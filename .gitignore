@@ -1,0 +1,49 @@
+# Build output
+build/
+*.obj
+*.o
+*.a
+*.lib
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Logs and runtime files
+*.log
+last_run.log
+*.txt
+stderr*.txt
+
+# Editor / UI settings
+imgui.ini
+
+# Screenshots and generated images
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+
+# Visual Studio build artifacts
+*.pdb
+*.ilk
+*.idb
+*.pch
+*.ipdb
+*.iobj
+*.tlog
+*.lastbuildstate
+*.vcxproj.user
+.vs/
+
+# CMake
+CMakeFiles/
+cmake_install.cmake
+Makefile
+CMakeCache.txt
+
+# Misc junk
+NUL
+Thumbs.db
+.DS_Store
