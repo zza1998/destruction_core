@@ -1,53 +1,55 @@
 # Blast Support Graph Demo
 
-This demo visualizes a five-floor simplified building support graph without PhysX.
+This demo visualizes a simplified building support graph and drives structural
+collapse from static gravity load routing, with PhysX providing the falling/debris
+presentation.
 
-`ReducedStaticsSolver` is an independent 2D reduced statics module. It solves
-support reactions from force and moment equilibrium (`sum Fx`, `sum Fy`,
-`sum M`) and reports reaction utilization, instability, and capacity failure.
-It is intentionally separate from the Blast support graph so its equations can
-be inspected and later integrated into the building model.
+## Structural model
 
-## Modules and fixes
+The active analysis path is a static gravity solver (`StaticGravitySolver`):
 
-- `BlastRuntime` owns Blast framework, asset, actor, group, and column-bond
-  fracture lifecycle. It does not decide structural support or load results.
-- `SupportGraphSolver` owns directed Ground reachability, dirty BFS, and local
-  affected-node collection. `BlastSupportModel` retains public API, state,
-  snapshots, events, and analysis orchestration.
-- Support paths remain `Column -> lower Block -> neighboring Block -> lower
-  Column/Ground`; columns never connect directly across floors.
-- Loads use a one-way chain on each floor, from outside `slot0` toward inside
-  `slot3`. A block receives its own mass, the same-slot upper column load, and
-  the carried load from the previous slot. The resulting value is written to
-  both the block and its column. A live block and column must both be within
-  capacity; if either is broken or overloaded, its released load continues to
-  the next live slot. Column self-weight and column load continue through the
-  same slot on the floor below.
-- Analysis uses dirty BFS and processes only affected floor components, from
-  high floors down to low floors, until the dirty queue is stable. Horizontal
-  and vertical `EdgeState.load` values show the actual chain transfer.
-- `ReducedStaticsSolver` remains an independent module and is not used by the
-  Blast support load analysis.
+- Gravity is the only load. Every member's own mass plus the mass carried down to
+  it is routed along live, directed support edges toward Ground (`id 0`).
+- A node is supported only when it has a strictly closer live route to Ground.
+  Load flows from the farthest node toward Ground; each node splits its carried
+  mass among its closer outlets by `EdgeState::shareWeight` (all `1.0f` by
+  default). The load's horizontal center of mass travels with it.
+- A vertical bearing (column or wall, derived from geometry) fails when its
+  combined utilization reaches `1.0`:
+  `compressionUtilization (carriedMass / capacity) + bendingUtilization
+  (carried-COM offset / maxOverhang)`. `maxOverhang` is `0` by default, so legacy
+  presets use axial capacity only; an authored positive overhang adds the
+  inverted-L / eccentric-load check.
+- Directly broken members and overloaded members are failed and cut all their
+  incident edges; an unsupported component (no live path to Ground) is released
+  as a dynamic body instead of being re-routed into artificial load paths.
+- `tickAnalysis()` re-solves the whole live graph each pass until no node is
+  unsupported, then schedules overloads as one delayed wave. `update()` executes
+  overdue overload failures and re-analyzes.
+
+This is a static screening model, not a finite-element or impulse solver: contact
+forces, explosions, shear/diaphragm failure, and load-bearing stairs are not part
+of this version. Lateral shear (`plateShearCapacity`, `ShearPair`) remains as
+public API/preset data but no longer drives structural failure.
+
+## Modules
+
+- `StaticGravitySolver` owns ground-distance BFS, deterministic load routing, and
+  compression/bending utilization. It has no Blast, PhysX, UI, or preset coupling.
+- `BlastRuntime` owns the Blast framework asset/actor/group lifecycle and
+  column-bond fracture.
+- `SupportGraphSolver` owns directed Ground reachability and dirty-node bookkeeping
+  used to trigger re-analysis.
+- `BlastSupportModel` owns state, snapshots, events, presets, and orchestrates the
+  static solve + failure scheduling.
+- `PhysicsWorld` consumes confirmed releases to convert intact components to
+  dynamic bodies and spawn debris fragments for broken/overloaded members.
+
+## Interactions
 
 - Click a block or column to select it; press `Space` to damage the selected node.
-- The model propagates floor mass through the directional chain and marks
-  overloaded or unsupported regions.
-- `StructuralConfig` controls column capacity and the overload failure ratio.
-  There is no hard-coded minimum-column collapse rule.
-  A one-layer grounded column remains independent after its upper load is gone;
-  with live upper load, its actual redistributed load can still break it.
-- The right panel shows block/column weight, load/capacity utilization, status, and events.
-- Press `S` to run an explicit analysis step.
-- Press `R` to reset and `Esc` to exit.
-- Every block and column has its own normalized mass, shown as `W` in the
-  viewport and `Weight` in the Inspector. All masses are below 100.
-
-Blast Toolkit owns the sample asset/actor/group lifecycle and bond fracture
-operation. The application layer adds floor semantics, mass, capacity, and
-load propagation. This is a real-time structural screening model, not a finite
-element solver and not a rigid-body simulation; PhysX can be added later as a
-separate bridge after the support analysis is validated.
+- Press `S` to run an explicit analysis step, `R` to reset, `Esc` to exit.
+- The right panel shows member weight, carried mass, utilization, status, and events.
 
 ## Build
 
@@ -58,5 +60,8 @@ Run `build.bat` from a Visual Studio Developer Command Prompt. Set
 build.bat
 ```
 
-The script links against the Release libraries under
+Run `build_tests.bat` to build and execute the full test suite (structural model,
+static solver, reduced statics, sparse Cholesky, and PhysX smoke tests).
+
+The scripts link against the Release libraries under
 `..\_build\windows-x86_64\release\blast-sdk` by default.

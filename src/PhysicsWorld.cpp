@@ -33,12 +33,11 @@ public:
 
 bool shouldFall(const NodeState& node)
 {
-    // Collapse is driven purely by the confirmed structure state. During a
-    // cascade the structure model schedules failures with a delay, so a member
-    // may temporarily carry an over-capacity load or be marked Overloaded while
-    // still standing; the physics layer must wait until the model actually
-    // kills it (alive=false / Unsupported) instead of reacting early.
-    return !node.alive || node.status == NodeStatus::Unsupported;
+    // Collapse is driven purely by the confirmed structure state. The static
+    // gravity model resolves every failed or unsupported node to alive==false
+    // before this layer is consulted, so the physics layer only reacts to a
+    // model-confirmed release and never to a transient overload or support loss.
+    return !node.alive;
 }
 
 void writeMat44(const physx::PxMat44& m, float* out16)
