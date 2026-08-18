@@ -195,11 +195,7 @@ const float capacity = isGrid() ? gridCapacityFor(floor)
     std::string blastError;
     if (!m_blastRuntime->initialize(m_nodes, m_edges, m_activeFloors, m_activeColumns, m_activeBlocks, m_activeWalls, blastError))
         addEvent(blastError);
-    const StaticGravityResult initial = m_staticGravitySolver->solve(m_nodes, m_edges);
-    for (std::size_t i = 0; i < m_nodes.size(); ++i)
-        if (i > 0 && deriveRole(m_nodes[i].box) == MemberRole::HorizontalPlate)
-            m_nodes[i].baselineOverhang = initial.plateOverhang[i];
-    applyStaticGravityResult(initial);
+    applyStaticGravityResult(m_staticGravitySolver->solve(m_nodes, m_edges));
     if (isGrid())
         addEvent("Reset: " + std::to_string(m_activeFloors) + " floors, " +
                  std::to_string(m_activeBlocks) + " blocks + " +

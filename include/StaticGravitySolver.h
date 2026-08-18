@@ -21,7 +21,6 @@ struct StaticGravityResult
     std::vector<StaticGravityNodeResult> nodes;
     std::vector<int> distanceToGround;
     std::vector<float> edgeTransferredMass;
-    std::vector<float> plateOverhang;   // per-node horizontal arm to nearest stable plate
     std::vector<int> unsupportedNodes;
     std::vector<int> overloadedNodes;
 };

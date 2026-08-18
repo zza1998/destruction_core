@@ -6,7 +6,7 @@
 #include <cstddef>
 #include <deque>
 #include <limits>
-#include <queue>
+#include <utility>
 
 namespace blast_demo
 {
@@ -27,7 +27,6 @@ StaticGravityResult StaticGravitySolver::solve(const std::vector<NodeState>& nod
     result.nodes.assign(static_cast<std::size_t>(n), StaticGravityNodeResult());
     result.distanceToGround.assign(static_cast<std::size_t>(n), -1);
     result.edgeTransferredMass.assign(edges.size(), 0.0f);
-    result.plateOverhang.assign(static_cast<std::size_t>(n), 0.0f);
 
     if (n <= 0) return result;
 
@@ -145,77 +144,178 @@ StaticGravityResult StaticGravitySolver::solve(const std::vector<NodeState>& nod
         }
     }
 
-    // Precompute each plate's "overhang arm": the shortest horizontal-chain
-    // distance to the nearest stable plate, where a stable plate is one with a
-    // live vertical bearing directly beneath it. This makes a continuous 2D
-    // floor stay put while a corner or span whose supports are destroyed
-    // overhangs by its distance to the remaining support, resolving
-    // multi-directional and combined overhangs uniformly.
-    std::vector<float> plateOverhang(static_cast<std::size_t>(n), 0.0f);
+    // Precompute plate cantilever (overhang) results. A floor is modelled as a
+    // set of connected plate components (joined by live horizontal contacts);
+    // each component's support is the set of live vertical bearings whose top
+    // touches a plate in that component. A plate overhangs when its own centre
+    // lies horizontally outside the convex hull of that support set by more than
+    // its maxOverhang. This handles one-dimensional chains (ShearPair) and 2D
+    // grids uniformly: an intact floor's hull encloses every plate, a removed
+    // corner shrinks the hull so the gap-edge plates overhang and fail, and the
+    // cascade advances inward plate by plate.
+    for (int i = 1; i < n; ++i)
     {
-        struct Pq { float d; int id; bool operator<(const Pq& o) const { return d > o.d; } };
-        std::priority_queue<Pq> pq;
-        std::vector<float> best(static_cast<std::size_t>(n),
-                                std::numeric_limits<float>::infinity());
-        for (int i = 1; i < n; ++i)
+        result.nodes[static_cast<std::size_t>(i)].bendingUtilization = 0.0f;
+        result.nodes[static_cast<std::size_t>(i)].utilization = 0.0f;
+    }
+    {
+        std::vector<char> compVisited(static_cast<std::size_t>(n), 0);
+        for (int seed = 1; seed < n; ++seed)
         {
-            if (deriveRole(nodes[static_cast<std::size_t>(i)].box) != MemberRole::HorizontalPlate)
-                continue;
-            bool stable = false;
-            for (std::size_t ei = 0; ei < edges.size() && !stable; ++ei)
+            const NodeState& sn = nodes[static_cast<std::size_t>(seed)];
+            if (!sn.alive || compVisited[static_cast<std::size_t>(seed)]) continue;
+            if (deriveRole(sn.box) != MemberRole::HorizontalPlate) continue;
+            if (sn.maxOverhang <= 0.0f) continue;
+
+            // BFS the horizontal-contact plate component.
+            std::vector<int> comp;
+            std::deque<int> q;
+            q.push_back(seed);
+            compVisited[static_cast<std::size_t>(seed)] = 1;
+            while (!q.empty())
             {
-                const EdgeState& e = edges[ei];
-                if (!e.alive || e.shareWeight <= 0.0f) continue;
-                if (e.from != i && e.to != i) continue;
-                const int other = e.from == i ? e.to : e.from;
-                if (other <= 0 || other >= n) continue;
-                if (!nodes[static_cast<std::size_t>(other)].alive) continue;
-                if (deriveRole(nodes[static_cast<std::size_t>(other)].box) != MemberRole::VerticalBearing) continue;
-                if (verticalContact(nodes[static_cast<std::size_t>(i)].box,
-                                    nodes[static_cast<std::size_t>(other)].box) ||
-                    verticalContact(nodes[static_cast<std::size_t>(other)].box,
-                                    nodes[static_cast<std::size_t>(i)].box))
-                    stable = true;
-            }
-            if (stable)
-            {
-                best[static_cast<std::size_t>(i)] = 0.0f;
-                pq.push(Pq{0.0f, i});
-            }
-        }
-        while (!pq.empty())
-        {
-            Pq cur = pq.top(); pq.pop();
-            if (cur.d > best[static_cast<std::size_t>(cur.id)] + 1e-6f) continue;
-            for (std::size_t ei = 0; ei < edges.size(); ++ei)
-            {
-                const EdgeState& e = edges[ei];
-                if (!e.alive || e.shareWeight <= 0.0f) continue;
-                if (e.from != cur.id && e.to != cur.id) continue;
-                const int other = e.from == cur.id ? e.to : e.from;
-                if (other <= 0 || other >= n) continue;
-                if (!nodes[static_cast<std::size_t>(other)].alive) continue;
-                if (deriveRole(nodes[static_cast<std::size_t>(other)].box) != MemberRole::HorizontalPlate) continue;
-                if (!horizontalContact(nodes[static_cast<std::size_t>(cur.id)].box,
-                                       nodes[static_cast<std::size_t>(other)].box)) continue;
-                const BoxLayout& a = nodes[static_cast<std::size_t>(cur.id)].box;
-                const BoxLayout& b = nodes[static_cast<std::size_t>(other)].box;
-                const float dx = b.cx - a.cx;
-                const float dz = b.cz - a.cz;
-                const float w = std::sqrt(dx * dx + dz * dz);
-                const float nd = cur.d + w;
-                if (nd < best[static_cast<std::size_t>(other)])
+                const int cur = q.front(); q.pop_front();
+                comp.push_back(cur);
+                for (std::size_t ei = 0; ei < edges.size(); ++ei)
                 {
-                    best[static_cast<std::size_t>(other)] = nd;
-                    pq.push(Pq{nd, other});
+                    const EdgeState& e = edges[ei];
+                    if (!e.alive || e.shareWeight <= 0.0f) continue;
+                    int other = -1;
+                    if (e.from == cur) other = e.to;
+                    else if (e.to == cur) other = e.from;
+                    else continue;
+                    if (other <= 0 || other >= n) continue;
+                    if (!nodes[static_cast<std::size_t>(other)].alive) continue;
+                    if (deriveRole(nodes[static_cast<std::size_t>(other)].box) != MemberRole::HorizontalPlate) continue;
+                    if (!horizontalContact(nodes[static_cast<std::size_t>(cur)].box,
+                                           nodes[static_cast<std::size_t>(other)].box)) continue;
+                    if (compVisited[static_cast<std::size_t>(other)]) continue;
+                    compVisited[static_cast<std::size_t>(other)] = 1;
+                    q.push_back(other);
                 }
             }
+
+            // Collect live vertical bearings touching a plate in this component.
+            std::vector<int> supports;
+            for (int pid : comp)
+            {
+                for (std::size_t ei = 0; ei < edges.size(); ++ei)
+                {
+                    const EdgeState& e = edges[ei];
+                    if (!e.alive || e.shareWeight <= 0.0f) continue;
+                    int other = -1;
+                    if (e.from == pid) other = e.to;
+                    else if (e.to == pid) other = e.from;
+                    else continue;
+                    if (other <= 0 || other >= n) continue;
+                    if (!nodes[static_cast<std::size_t>(other)].alive) continue;
+                    if (deriveRole(nodes[static_cast<std::size_t>(other)].box) != MemberRole::VerticalBearing) continue;
+                    if (!verticalContact(nodes[static_cast<std::size_t>(pid)].box,
+                                         nodes[static_cast<std::size_t>(other)].box) &&
+                        !verticalContact(nodes[static_cast<std::size_t>(other)].box,
+                                         nodes[static_cast<std::size_t>(pid)].box)) continue;
+                    supports.push_back(other);
+                }
+            }
+            // Build the convex hull of the support points (x,z). Use the true 2D
+            // hull rather than an axis-aligned box so a missing corner column
+            // leaves a real gap: the hull is a polygon whose far corner is cut off,
+            // and the plate at that corner then lies outside it.
+            std::vector<std::pair<float,float>> pts;
+            for (int sid : supports)
+            {
+                const BoxLayout& s = nodes[static_cast<std::size_t>(sid)].box;
+                pts.push_back(std::make_pair(s.cx, s.cz));
+            }
+            std::sort(pts.begin(), pts.end());
+            pts.erase(std::unique(pts.begin(), pts.end()), pts.end());
+            std::vector<std::pair<float,float>> hull;
+            auto cross = [](const std::pair<float,float>& o,
+                            const std::pair<float,float>& a,
+                            const std::pair<float,float>& b) {
+                return (a.first - o.first) * (b.second - o.second) -
+                       (a.second - o.second) * (b.first - o.first);
+            };
+            if (pts.size() >= 3u)
+            {
+                for (int pass = 0; pass < 2; ++pass)
+                {
+                    std::size_t start = hull.size();
+                    for (const auto& p : pts)
+                    {
+                        while (hull.size() >= start + 2 &&
+                               cross(hull[hull.size()-2], hull.back(), p) <= 1e-9f)
+                            hull.pop_back();
+                        hull.push_back(p);
+                    }
+                    hull.pop_back();
+                    std::reverse(pts.begin(), pts.end());
+                }
+            }
+            else
+            {
+                hull = pts;
+            }
+
+            // Distance (or 0 if inside) from a query point to the hull polygon.
+            auto pointHullDistance = [&](float cx, float cz) -> float {
+                if (hull.empty()) return 0.0f;
+                auto segDist = [](float px, float pz, float ax, float az, float bx, float bz) -> float {
+                    const float abx = bx - ax, abz = bz - az;
+                    const float len2 = abx * abx + abz * abz;
+                    float t = len2 > 0.0f ? ((px - ax) * abx + (pz - az) * abz) / len2 : 0.0f;
+                    t = std::max(0.0f, std::min(1.0f, t));
+                    const float dx = px - (ax + t * abx);
+                    const float dz = pz - (az + t * abz);
+                    return std::sqrt(dx * dx + dz * dz);
+                };
+                // A single point (or a segment) yields the distance to that set.
+                if (hull.size() == 1u)
+                {
+                    const float dx = cx - hull[0].first;
+                    const float dz = cz - hull[0].second;
+                    return std::sqrt(dx * dx + dz * dz);
+                }
+                if (hull.size() == 2u)
+                {
+                    return segDist(cx, cz, hull[0].first, hull[0].second, hull[1].first, hull[1].second);
+                }
+                // True polygon: point-inside test (ray cast), else min edge distance.
+                bool inside = false;
+                const std::size_t m = hull.size();
+                for (std::size_t j = 0; j < m; ++j)
+                {
+                    const auto& a = hull[j];
+                    const auto& b = hull[(j + 1) % m];
+                    if ((a.second > cz) != (b.second > cz))
+                    {
+                        const float xcross = a.first + (cz - a.second) / (b.second - a.second) * (b.first - a.first);
+                        if (cx < xcross) inside = !inside;
+                    }
+                }
+                if (inside) return 0.0f;
+                float best = std::numeric_limits<float>::max();
+                for (std::size_t j = 0; j < m; ++j)
+                {
+                    const auto& a = hull[j];
+                    const auto& b = hull[(j + 1) % m];
+                    best = std::min(best, segDist(cx, cz, a.first, a.second, b.first, b.second));
+                }
+                return best;
+            };
+
+            // For each plate, compute eccentricity of its own centre outside the hull.
+            for (int pid : comp)
+            {
+                const NodeState& p = nodes[static_cast<std::size_t>(pid)];
+                if (p.maxOverhang <= 0.0f) continue;
+                const float overhang = hull.empty() ? 0.0f : pointHullDistance(p.box.cx, p.box.cz);
+                const float bending = overhang / p.maxOverhang;
+                result.nodes[static_cast<std::size_t>(pid)].bendingUtilization = bending;
+                result.nodes[static_cast<std::size_t>(pid)].utilization = bending;
+            }
         }
-        for (int i = 1; i < n; ++i)
-            if (best[static_cast<std::size_t>(i)] != std::numeric_limits<float>::infinity())
-                plateOverhang[static_cast<std::size_t>(i)] = best[static_cast<std::size_t>(i)];
     }
-    result.plateOverhang = plateOverhang;
 
     // Finalize carried mass / COM and evaluate vertical bearings.
     for (int i = 1; i < n; ++i)
@@ -262,19 +362,11 @@ StaticGravityResult StaticGravitySolver::solve(const std::vector<NodeState>& nod
         }
         else if (deriveRole(node.box) == MemberRole::HorizontalPlate && node.maxOverhang > 0.0f)
         {
-            // Cantilever (overhang) failure: a plate fails only when its current
-            // overhang arm exceeds the arm it had at reset (baselineOverhang) by
-            // more than maxOverhang. An intact floor therefore never fails, while
-            // a plate at the edge of a freshly opened gap — whose arm grew because
-            // a neighbour/support was removed — overhangs and fails. The tolerance
-            // controls how much extra overhang is permitted before failure.
-            const float overhang = plateOverhang[static_cast<std::size_t>(i)];
-            const float extra = overhang - node.baselineOverhang;
-            const float bending = extra / node.maxOverhang;
-            result.nodes[static_cast<std::size_t>(i)].bendingUtilization = bending;
-            result.nodes[static_cast<std::size_t>(i)].utilization = bending;
-
-            if (extra > 0.0f && bending >= 1.0f)
+            // Cantilever (overhang) failure via component support hull, resolved
+            // pre-pass below (see computeComponentOverhang). This per-node branch
+            // just records the precomputed utilization onto the result.
+            const float bending = result.nodes[static_cast<std::size_t>(i)].bendingUtilization;
+            if (bending >= 1.0f)
                 result.overloadedNodes.push_back(i);
         }
     }
