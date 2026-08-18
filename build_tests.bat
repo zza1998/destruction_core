@@ -40,6 +40,8 @@ cl /nologo /std:c++14 /EHsc /W4 /DNDEBUG /I"%DEMO_DIR%include" /I"%DEMO_DIR%src"
 if errorlevel 1 exit /b 1
 cl /nologo /std:c++14 /EHsc /W4 /DNDEBUG /I"%DEMO_DIR%include" /I"%DEMO_DIR%src" /Fe:"%OUT%\choltest2.exe" "%DEMO_DIR%tests\choltest2.cpp" "%DEMO_DIR%src\SparseCholeskySolver.cpp"
 if errorlevel 1 exit /b 1
+cl /nologo /std:c++14 /EHsc /W4 /DNDEBUG /I"%DEMO_DIR%include" /I"%DEMO_DIR%src" /Fe:"%OUT%\StaticGravitySolverTests.exe" "%DEMO_DIR%tests\StaticGravitySolverTests.cpp" "%DEMO_DIR%src\StaticGravitySolver.cpp"
+if errorlevel 1 exit /b 1
 copy /y "%SDK%\bin\*.dll" "%OUT%" >nul
 "%OUT%\StructuralModelTests.exe"
 if errorlevel 1 exit /b 1
@@ -48,3 +50,5 @@ if errorlevel 1 exit /b 1
 "%OUT%\SparseCholeskyTests.exe"
 if errorlevel 1 exit /b 1
 "%OUT%\choltest2.exe"
+if errorlevel 1 exit /b 1
+"%OUT%\StaticGravitySolverTests.exe"
