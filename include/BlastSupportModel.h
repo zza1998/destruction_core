@@ -29,6 +29,11 @@ struct StructuralConfig
     // for public API/preset compatibility; the static-gravity solver no longer
     // drives structural failure from lateral shear.
     float plateShearCapacity = 300.0f;
+    // How far a floor plate may overhang past its last support before the
+    // resulting cantilever moment fails it, expressed as a multiple of its own
+    // half-width. Small values snap a free end quickly; large values let a plate
+    // span a longer gap. This is the designer-facing "cantilever tolerance".
+    float plateOverhangFactor = 1.0f;
     // Maximum number of failure waves allowed per tickAnalysis before the
     // unresolved supported component is forcibly released. Clamped to at least 1.
     unsigned int maxCascadeWaves = 64;
@@ -90,6 +95,12 @@ public:
     // Single source for the lateral (shear) failure threshold. Updates the
     // config and re-derives every member's shearCapacity from its geometry.
     void setPlateShearCapacity(float loadUnits);
+    // Sets how far a floor plate may overhang its last support before snapping,
+    // as a multiple of its own half-width. Re-derives every slab's maxOverhang.
+    void setPlateOverhangFactor(float factor);
+    // Convenience presets for the designer-facing cantilever tolerance.
+    enum class PlateOverhang { Small, Medium, Large };
+    void setPlateOverhang(PlateOverhang level);
 
     // Fragments spawned by destroyed members since the last call. PhysicsWorld
     // consumes this to create visual debris bodies.

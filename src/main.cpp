@@ -148,6 +148,12 @@ static int runDemo(bool smoke)
         float plateShear = model.config().plateShearCapacity;
         if (ImGui::SliderFloat("Shear cap (load)", &plateShear, 50.0f, 5000.0f, "%.0f"))
             model.setPlateShearCapacity(plateShear);
+        static const char* overhangLabels[] = {"Small", "Medium", "Large"};
+        int overhangLevel = 1;   // medium default
+        const float f = model.config().plateOverhangFactor;
+        overhangLevel = f >= 1.5f ? 2 : (f >= 0.75f ? 1 : 0);
+        if (ImGui::Combo("Cantilever tolerance", &overhangLevel, overhangLabels, 3))
+            model.setPlateOverhang(static_cast<blast_demo::BlastSupportModel::PlateOverhang>(overhangLevel));
         bool showLabels = scene3d.showLabels();
         if (ImGui::Checkbox("Show node labels", &showLabels))
             scene3d.setShowLabels(showLabels);

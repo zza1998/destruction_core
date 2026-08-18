@@ -114,6 +114,12 @@ void BlastSupportModel::reset()
             slab.supported = true;
             slab.status = NodeStatus::Safe;
             slab.box = nodeLayout(floor, slot, LayoutKind::Slab, m_activeColumns, m_activeBlocks, false);
+            // A slab may overhang past its last support (an end support removed)
+            // by up to plateOverhangFactor times its own half-width before the
+            // resulting cantilever moment fails it. This lets a ShearPair row drop
+            // its free end as an L-shape after one end column is destroyed, with
+            // the tolerance designers tune via Small/Medium/Large.
+            slab.maxOverhang = std::max(slab.box.hx, slab.box.hz) * m_config.plateOverhangFactor;
             m_nodes.push_back(slab);
         }
     }
@@ -359,6 +365,27 @@ void BlastSupportModel::setPlateShearCapacity(float loadUnits)
         {
             node.shearCapacity = m_config.plateShearCapacity;
         }
+    }
+}
+
+void BlastSupportModel::setPlateOverhangFactor(float factor)
+{
+    m_config.plateOverhangFactor = std::max(factor, 0.0f);
+    for (NodeState& node : m_nodes)
+    {
+        if (node.id == 0 || deriveRole(node.box) != MemberRole::HorizontalPlate)
+            continue;
+        node.maxOverhang = std::max(node.box.hx, node.box.hz) * m_config.plateOverhangFactor;
+    }
+}
+
+void BlastSupportModel::setPlateOverhang(PlateOverhang level)
+{
+    switch (level)
+    {
+    case PlateOverhang::Small:  setPlateOverhangFactor(0.5f); break;
+    case PlateOverhang::Medium: setPlateOverhangFactor(1.0f); break;
+    case PlateOverhang::Large:  setPlateOverhangFactor(2.0f); break;
     }
 }
 

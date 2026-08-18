@@ -228,6 +228,25 @@ int main()
             if (node.id != 0 && node.alive && node.lateralShear != 0.0f)
                 return check(false, "lateralShear is nonzero after static gravity analysis") ? 1 : 1;
     }
+    // Cantilever (overhang) failure: after destroying the left end column of a
+    // ShearPair row, the now-free left plates overhang and fail, while the plate
+    // still sitting on the surviving right column holds. Increasing the tolerance
+    // to Large lets more plates survive.
+    {
+        BlastSupportModel model;
+        model.setPreset(StructuralPreset::ShearPair);
+        model.setCascadeDelay(0.0f);
+        model.setPlateOverhang(BlastSupportModel::PlateOverhang::Medium);
+        model.damageColumn(0, 0, 100.0f);
+        for (int i = 0; i < 8; ++i) model.tickAnalysis();
+        model.update(99999.0f);
+        // The plate over the surviving right column stays alive.
+        if (!check(model.nodes()[blockId(model, 0, 3)].alive,
+                   "plated column plate did not survive end-column destruction")) return 1;
+        // At least the far-left free plate overhung and failed.
+        if (!check(!model.nodes()[blockId(model, 0, 0)].alive,
+                   "free end plate did not overhang-fail after end-column destruction")) return 1;
+    }
     std::cout << "PASS: static gravity integration, release, cascade, and preset checks\n";
     return 0;
 }

@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <deque>
+#include <limits>
 
 namespace blast_demo
 {
@@ -166,24 +167,93 @@ StaticGravityResult StaticGravitySolver::solve(const std::vector<NodeState>& nod
             result.nodes[static_cast<std::size_t>(i)].carriedComZ = node.box.cz;
         }
 
-        if (deriveRole(node.box) != MemberRole::VerticalBearing) continue;
-
-        const float clampedCapacity = node.capacity > 0.0f ? node.capacity : 0.001f;
-        const float compression = static_cast<float>(mass) / clampedCapacity;
-        float bending = 0.0f;
-        if (node.maxOverhang > 0.0f)
+        if (deriveRole(node.box) == MemberRole::VerticalBearing)
         {
-            const float dx = result.nodes[static_cast<std::size_t>(i)].carriedComX - node.box.cx;
-            const float dz = result.nodes[static_cast<std::size_t>(i)].carriedComZ - node.box.cz;
-            const float eccentricity = std::sqrt(dx * dx + dz * dz);
-            bending = eccentricity / node.maxOverhang;
-        }
-        result.nodes[static_cast<std::size_t>(i)].compressionUtilization = compression;
-        result.nodes[static_cast<std::size_t>(i)].bendingUtilization = bending;
-        result.nodes[static_cast<std::size_t>(i)].utilization = compression + bending;
+            const float clampedCapacity = node.capacity > 0.0f ? node.capacity : 0.001f;
+            const float compression = static_cast<float>(mass) / clampedCapacity;
+            float bending = 0.0f;
+            if (node.maxOverhang > 0.0f)
+            {
+                const float dx = result.nodes[static_cast<std::size_t>(i)].carriedComX - node.box.cx;
+                const float dz = result.nodes[static_cast<std::size_t>(i)].carriedComZ - node.box.cz;
+                const float eccentricity = std::sqrt(dx * dx + dz * dz);
+                bending = eccentricity / node.maxOverhang;
+            }
+            result.nodes[static_cast<std::size_t>(i)].compressionUtilization = compression;
+            result.nodes[static_cast<std::size_t>(i)].bendingUtilization = bending;
+            result.nodes[static_cast<std::size_t>(i)].utilization = compression + bending;
 
-        if (compression + bending >= 1.0f)
-            result.overloadedNodes.push_back(i);
+            if (compression + bending >= 1.0f)
+                result.overloadedNodes.push_back(i);
+        }
+        else if (deriveRole(node.box) == MemberRole::HorizontalPlate && node.maxOverhang > 0.0f)
+        {
+            // Cantilever (overhang) failure for a floor plate, resolved per axis
+            // from its edge-support freedom: a plate is stable on an axis when it
+            // has a live horizontal neighbour on both sides (or a direct vertical
+            // support). If its horizontal neighbours all sit on one side only, the
+            // far side is a free end and the plate overhangs by the distance from
+            // its own centre to the nearest supporting neighbour on that axis.
+            const int dist = result.distanceToGround[static_cast<std::size_t>(i)];
+            bool hasVerticalSupport = false;
+            bool hasLeft = false, hasRight = false, hasFront = false, hasBack = false;
+            float nearestRight = std::numeric_limits<float>::max();
+            float nearestLeft = std::numeric_limits<float>::max();
+            float nearestFront = std::numeric_limits<float>::max();
+            float nearestBack = std::numeric_limits<float>::max();
+            for (std::size_t ei = 0; ei < edges.size(); ++ei)
+            {
+                const EdgeState& e = edges[ei];
+                if (!e.alive || e.shareWeight <= 0.0f) continue;
+                if (e.from != i && e.to != i) continue;
+                if (e.to < 0 || e.to >= n || e.from < 0 || e.from >= n) continue;
+                const int other = e.from == i ? e.to : e.from;
+                if (!nodes[static_cast<std::size_t>(other)].alive) continue;
+                const BoxLayout& o = nodes[static_cast<std::size_t>(other)].box;
+                const bool horizontal = horizontalContact(node.box, o);
+                const bool vertical = verticalContact(node.box, o) ||
+                                      verticalContact(o, node.box);
+                if (vertical)
+                {
+                    hasVerticalSupport = true;
+                    continue;
+                }
+                if (!horizontal) continue;
+                const float dx = o.cx - node.box.cx;
+                const float dz = o.cz - node.box.cz;
+                if (std::fabs(dx) > std::fabs(dz))
+                {
+                    if (dx > 1e-3f) { hasRight = true; nearestRight = std::min(nearestRight, dx); }
+                    else if (dx < -1e-3f) { hasLeft = true; nearestLeft = std::min(nearestLeft, -dx); }
+                }
+                else
+                {
+                    if (dz > 1e-3f) { hasBack = true; nearestBack = std::min(nearestBack, dz); }
+                    else if (dz < -1e-3f) { hasFront = true; nearestFront = std::min(nearestFront, -dz); }
+                }
+            }
+
+            float overhangX = 0.0f;
+            float overhangZ = 0.0f;
+            if (!hasVerticalSupport)
+            {
+                if (hasRight && !hasLeft && nearestRight < std::numeric_limits<float>::max())
+                    overhangX = nearestRight;   // free on the -X side
+                else if (hasLeft && !hasRight && nearestLeft < std::numeric_limits<float>::max())
+                    overhangX = nearestLeft;    // free on the +X side
+                if (hasBack && !hasFront && nearestBack < std::numeric_limits<float>::max())
+                    overhangZ = nearestBack;    // free on the -Z side
+                else if (hasFront && !hasBack && nearestFront < std::numeric_limits<float>::max())
+                    overhangZ = nearestFront;   // free on the +Z side
+            }
+            const float overhang = std::sqrt(overhangX * overhangX + overhangZ * overhangZ);
+            const float bending = overhang / node.maxOverhang;
+            result.nodes[static_cast<std::size_t>(i)].bendingUtilization = bending;
+            result.nodes[static_cast<std::size_t>(i)].utilization = bending;
+
+            if (bending >= 1.0f)
+                result.overloadedNodes.push_back(i);
+        }
     }
 
     return result;
