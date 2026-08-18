@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <deque>
 #include <limits>
+#include <queue>
 
 namespace blast_demo
 {
@@ -26,6 +27,7 @@ StaticGravityResult StaticGravitySolver::solve(const std::vector<NodeState>& nod
     result.nodes.assign(static_cast<std::size_t>(n), StaticGravityNodeResult());
     result.distanceToGround.assign(static_cast<std::size_t>(n), -1);
     result.edgeTransferredMass.assign(edges.size(), 0.0f);
+    result.plateOverhang.assign(static_cast<std::size_t>(n), 0.0f);
 
     if (n <= 0) return result;
 
@@ -143,6 +145,78 @@ StaticGravityResult StaticGravitySolver::solve(const std::vector<NodeState>& nod
         }
     }
 
+    // Precompute each plate's "overhang arm": the shortest horizontal-chain
+    // distance to the nearest stable plate, where a stable plate is one with a
+    // live vertical bearing directly beneath it. This makes a continuous 2D
+    // floor stay put while a corner or span whose supports are destroyed
+    // overhangs by its distance to the remaining support, resolving
+    // multi-directional and combined overhangs uniformly.
+    std::vector<float> plateOverhang(static_cast<std::size_t>(n), 0.0f);
+    {
+        struct Pq { float d; int id; bool operator<(const Pq& o) const { return d > o.d; } };
+        std::priority_queue<Pq> pq;
+        std::vector<float> best(static_cast<std::size_t>(n),
+                                std::numeric_limits<float>::infinity());
+        for (int i = 1; i < n; ++i)
+        {
+            if (deriveRole(nodes[static_cast<std::size_t>(i)].box) != MemberRole::HorizontalPlate)
+                continue;
+            bool stable = false;
+            for (std::size_t ei = 0; ei < edges.size() && !stable; ++ei)
+            {
+                const EdgeState& e = edges[ei];
+                if (!e.alive || e.shareWeight <= 0.0f) continue;
+                if (e.from != i && e.to != i) continue;
+                const int other = e.from == i ? e.to : e.from;
+                if (other <= 0 || other >= n) continue;
+                if (!nodes[static_cast<std::size_t>(other)].alive) continue;
+                if (deriveRole(nodes[static_cast<std::size_t>(other)].box) != MemberRole::VerticalBearing) continue;
+                if (verticalContact(nodes[static_cast<std::size_t>(i)].box,
+                                    nodes[static_cast<std::size_t>(other)].box) ||
+                    verticalContact(nodes[static_cast<std::size_t>(other)].box,
+                                    nodes[static_cast<std::size_t>(i)].box))
+                    stable = true;
+            }
+            if (stable)
+            {
+                best[static_cast<std::size_t>(i)] = 0.0f;
+                pq.push(Pq{0.0f, i});
+            }
+        }
+        while (!pq.empty())
+        {
+            Pq cur = pq.top(); pq.pop();
+            if (cur.d > best[static_cast<std::size_t>(cur.id)] + 1e-6f) continue;
+            for (std::size_t ei = 0; ei < edges.size(); ++ei)
+            {
+                const EdgeState& e = edges[ei];
+                if (!e.alive || e.shareWeight <= 0.0f) continue;
+                if (e.from != cur.id && e.to != cur.id) continue;
+                const int other = e.from == cur.id ? e.to : e.from;
+                if (other <= 0 || other >= n) continue;
+                if (!nodes[static_cast<std::size_t>(other)].alive) continue;
+                if (deriveRole(nodes[static_cast<std::size_t>(other)].box) != MemberRole::HorizontalPlate) continue;
+                if (!horizontalContact(nodes[static_cast<std::size_t>(cur.id)].box,
+                                       nodes[static_cast<std::size_t>(other)].box)) continue;
+                const BoxLayout& a = nodes[static_cast<std::size_t>(cur.id)].box;
+                const BoxLayout& b = nodes[static_cast<std::size_t>(other)].box;
+                const float dx = b.cx - a.cx;
+                const float dz = b.cz - a.cz;
+                const float w = std::sqrt(dx * dx + dz * dz);
+                const float nd = cur.d + w;
+                if (nd < best[static_cast<std::size_t>(other)])
+                {
+                    best[static_cast<std::size_t>(other)] = nd;
+                    pq.push(Pq{nd, other});
+                }
+            }
+        }
+        for (int i = 1; i < n; ++i)
+            if (best[static_cast<std::size_t>(i)] != std::numeric_limits<float>::infinity())
+                plateOverhang[static_cast<std::size_t>(i)] = best[static_cast<std::size_t>(i)];
+    }
+    result.plateOverhang = plateOverhang;
+
     // Finalize carried mass / COM and evaluate vertical bearings.
     for (int i = 1; i < n; ++i)
     {
@@ -188,56 +262,19 @@ StaticGravityResult StaticGravitySolver::solve(const std::vector<NodeState>& nod
         }
         else if (deriveRole(node.box) == MemberRole::HorizontalPlate && node.maxOverhang > 0.0f)
         {
-            // Cantilever (overhang) failure for a floor plate. A plate overhangs
-            // only when it is the free end of a broken one-dimensional slab chain:
-            // exactly one live horizontal neighbour and no live vertical bearing
-            // directly beneath. A plate with two or more neighbours belongs to a
-            // continuous floor/beam and never overhangs this way. The overhang arm
-            // is the plate's horizontal distance to the nearest live vertical
-            // bearing, so a longer tolerance lets plates farther from the remaining
-            // support hold on (Small/Medium/Large tune how many drop).
-            std::vector<int> hNeighbours;
-            bool hasVerticalSupport = false;
-            for (std::size_t ei = 0; ei < edges.size(); ++ei)
-            {
-                const EdgeState& e = edges[ei];
-                if (!e.alive || e.shareWeight <= 0.0f) continue;
-                if (e.from != i && e.to != i) continue;
-                if (e.to < 0 || e.to >= n || e.from < 0 || e.from >= n) continue;
-                const int other = e.from == i ? e.to : e.from;
-                if (!nodes[static_cast<std::size_t>(other)].alive) continue;
-                const BoxLayout& o = nodes[static_cast<std::size_t>(other)].box;
-                if (verticalContact(node.box, o) || verticalContact(o, node.box))
-                {
-                    hasVerticalSupport = true;
-                    continue;
-                }
-                if (!horizontalContact(node.box, o)) continue;
-                if (std::find(hNeighbours.begin(), hNeighbours.end(), other) == hNeighbours.end())
-                    hNeighbours.push_back(other);
-            }
-
-            float overhang = 0.0f;
-            if (!hasVerticalSupport && hNeighbours.size() == 1u)
-            {
-                float nearest = std::numeric_limits<float>::max();
-                for (int b = 1; b < n; ++b)
-                {
-                    const NodeState& other = nodes[static_cast<std::size_t>(b)];
-                    if (!other.alive || b == i) continue;
-                    if (deriveRole(other.box) != MemberRole::VerticalBearing) continue;
-                    const float dx = other.box.cx - node.box.cx;
-                    const float dz = other.box.cz - node.box.cz;
-                    const float d = std::sqrt(dx * dx + dz * dz);
-                    if (d < nearest) nearest = d;
-                }
-                overhang = nearest == std::numeric_limits<float>::max() ? 0.0f : nearest;
-            }
-            const float bending = overhang / node.maxOverhang;
+            // Cantilever (overhang) failure: a plate fails only when its current
+            // overhang arm exceeds the arm it had at reset (baselineOverhang) by
+            // more than maxOverhang. An intact floor therefore never fails, while
+            // a plate at the edge of a freshly opened gap — whose arm grew because
+            // a neighbour/support was removed — overhangs and fails. The tolerance
+            // controls how much extra overhang is permitted before failure.
+            const float overhang = plateOverhang[static_cast<std::size_t>(i)];
+            const float extra = overhang - node.baselineOverhang;
+            const float bending = extra / node.maxOverhang;
             result.nodes[static_cast<std::size_t>(i)].bendingUtilization = bending;
             result.nodes[static_cast<std::size_t>(i)].utilization = bending;
 
-            if (bending >= 1.0f)
+            if (extra > 0.0f && bending >= 1.0f)
                 result.overloadedNodes.push_back(i);
         }
     }

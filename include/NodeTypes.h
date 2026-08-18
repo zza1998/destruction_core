@@ -45,8 +45,13 @@ struct NodeState
     // shearCapacity so their UI/lateral reads are meaningful.
     float lateralShear = 0.0f;
     float shearCapacity = 0.0f;   // horizontal shear limit for a plate
-    BoxLayout box;                  // geometric bounds (single source of truth)
+BoxLayout box;                  // geometric bounds (single source of truth)
     float maxOverhang = 0.0f;       // 0 means ignore bending in v1.
+    // Rest-state overhang arm (distance to the nearest stable plate) captured
+    // at reset. A plate only overhang-fails when its current arm exceeds this
+    // baseline by maxOverhang, so an intact continuous floor never fails and
+    // only a plate at the edge of a freshly opened gap does.
+    float baselineOverhang = 0.0f;
     float carriedMass = 0.0f;       // Solver diagnostic, includes own mass.
     float carriedComX = 0.0f;       // Solver diagnostic.
     float carriedComZ = 0.0f;

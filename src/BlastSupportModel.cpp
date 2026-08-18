@@ -195,7 +195,11 @@ const float capacity = isGrid() ? gridCapacityFor(floor)
     std::string blastError;
     if (!m_blastRuntime->initialize(m_nodes, m_edges, m_activeFloors, m_activeColumns, m_activeBlocks, m_activeWalls, blastError))
         addEvent(blastError);
-    applyStaticGravityResult(m_staticGravitySolver->solve(m_nodes, m_edges));
+    const StaticGravityResult initial = m_staticGravitySolver->solve(m_nodes, m_edges);
+    for (std::size_t i = 0; i < m_nodes.size(); ++i)
+        if (i > 0 && deriveRole(m_nodes[i].box) == MemberRole::HorizontalPlate)
+            m_nodes[i].baselineOverhang = initial.plateOverhang[i];
+    applyStaticGravityResult(initial);
     if (isGrid())
         addEvent("Reset: " + std::to_string(m_activeFloors) + " floors, " +
                  std::to_string(m_activeBlocks) + " blocks + " +
@@ -553,15 +557,20 @@ void BlastSupportModel::applyStaticGravityResult(const StaticGravityResult& resu
         if (id <= 0 || id >= static_cast<int>(m_nodes.size()) || !m_nodes[static_cast<size_t>(id)].alive)
             continue;
         const NodeState& node = m_nodes[static_cast<size_t>(id)];
-        const bool bendingDominant = node.bendingUtilization > node.compressionUtilization;
+        const bool isPlate = deriveRole(node.box) == MemberRole::HorizontalPlate;
+        const bool bendingDominant = isPlate || node.bendingUtilization > node.compressionUtilization;
         const std::string reason = bendingDominant ? "bending" : "axial";
-        if (bendingDominant)
+        if (bendingDominant && !isPlate)
         {
             const float eccentricity = std::sqrt(
                 (node.carriedComX - node.box.cx) * (node.carriedComX - node.box.cx) +
                 (node.carriedComZ - node.box.cz) * (node.carriedComZ - node.box.cz));
             const float moment = node.carriedMass * 9.81f * eccentricity;
             scheduleFail(id, NodeStatus::Overloaded, reason, 0.0f, 0.0f, moment);
+        }
+        else if (bendingDominant)
+        {
+            scheduleFail(id, NodeStatus::Overloaded, reason, 0.0f, 0.0f, 0.0f);
         }
         else
         {
