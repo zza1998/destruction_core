@@ -304,12 +304,11 @@ void BlastSupportModel::rebuildEdges()
 
 float BlastSupportModel::gridCapacityFor(int floor) const
 {
-    // Whole-floor load sharing accumulates downward: each floor contributes its
-    // live block, column and wall masses, so a lower member carries the
-    // stories above it. The capacity is the reference column's share of that
-    // total: with area-weighted load distribution every bearer's utilisation
-    // is the same, and the 0.051 factor sits between "one column destroyed
-    // stays under capacity" and "two columns destroyed overload the survivors".
+    // The static-gravity solver accumulates load downward along graph paths, so
+    // a lower member carries the mass of every story above it. Capacity is a
+    // fraction of that accumulated whole-building total; the 0.10 factor keeps
+    // the most-loaded corner member comfortably under capacity at rest while
+    // still allowing concentrated redistribution to overload survivors.
     float total = 0.0f;
     for (int f = m_activeFloors - 1; f >= floor; --f)
     {
@@ -318,7 +317,7 @@ float BlastSupportModel::gridCapacityFor(int floor) const
                  static_cast<float>(m_activeColumns) * memberMass +
                  static_cast<float>(m_activeWalls) * memberMass;
     }
-    return total * 0.040f;
+    return total * 0.10f;
 }
 
 void BlastSupportModel::setPlateShearCapacity(float loadUnits)
