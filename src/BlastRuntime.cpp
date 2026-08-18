@@ -1,7 +1,11 @@
 #include "BlastRuntime.h"
 #include "BlastSupportModel.h"
+#include "GeometryDerived.h"
+#include "NodeTypes.h"
 
 #include <limits>
+#include <set>
+#include <utility>
 
 namespace blast_demo
 {
@@ -14,21 +18,6 @@ const uint32_t Invalid = std::numeric_limits<uint32_t>::max();
 // under a marker bit so it can be told apart from the member's core chunk.
 constexpr uint32_t kFragmentUserDataFlag = 0x80000000u;
 constexpr uint32_t kFragmentsPerChunk = 8;
-
-int blockId(int floor, int slot, int blocksPerFloor)
-{
-    return 1 + floor * blocksPerFloor + slot;
-}
-
-int columnId(int floor, int slot, int floors, int columnsPerFloor, int blocksPerFloor)
-{
-    return 1 + floors * blocksPerFloor + floor * columnsPerFloor + slot;
-}
-
-int wallId(int floor, int slot, int floors, int columnsPerFloor, int blocksPerFloor, int wallsPerFloor)
-{
-    return 1 + floors * blocksPerFloor + floors * columnsPerFloor + floor * wallsPerFloor + slot;
-}
 
 // Core chunk index for a structural member (node ids are 1-based, Ground is 0).
 uint32_t coreChunkIndex(uint32_t nodeId)
@@ -75,9 +64,14 @@ void BlastRuntime::destroy()
     }
 }
 
-bool BlastRuntime::initialize(const std::vector<NodeState>& nodes, int floors, int columnsPerFloor,
-                              int blocksPerFloor, int wallsPerFloor, std::string& error)
+bool BlastRuntime::initialize(const std::vector<NodeState>& nodes, const std::vector<EdgeState>& edges,
+                              int floors, int columnsPerFloor, int blocksPerFloor, int wallsPerFloor,
+                              std::string& error)
 {
+    (void)floors;
+    (void)columnsPerFloor;
+    (void)blocksPerFloor;
+    (void)wallsPerFloor;
     destroy();
     using namespace Nv::Blast;
     const uint32_t structuralChunkCount = static_cast<uint32_t>(nodes.size() - 1);
@@ -87,9 +81,9 @@ bool BlastRuntime::initialize(const std::vector<NodeState>& nodes, int floors, i
     {
         const NodeState& node = nodes[static_cast<size_t>(i + 1)];
         NvBlastChunkDesc& core = chunks[i];
-        core.centroid[0] = static_cast<float>(node.slot) * 2.0f;
-        core.centroid[1] = static_cast<float>(node.floor) * 3.0f;
-        core.centroid[2] = node.type == NodeType::Slab ? 0.0f : 1.0f;
+        core.centroid[0] = node.box.cx;
+        core.centroid[1] = node.box.cy;
+        core.centroid[2] = node.box.cz;
         core.volume = 1.0f;
         core.parentChunkDescIndex = Invalid;
         core.flags = NvBlastChunkDesc::SupportFlag;
@@ -98,7 +92,13 @@ bool BlastRuntime::initialize(const std::vector<NodeState>& nodes, int floors, i
         // Pre-fracture pieces. Blast bonds only join support chunks, so every
         // fragment is a root support chunk bonded to its siblings (the seams);
         // the fragment clique forms its own connected component so it stays a
-        // single actor while the member is intact.
+        // single actor while the member is intact. Blast represents a support
+        // chunk as a sphere of radius ~0.31 (volume 0.125); the eight fragment
+        // centroids must sit far enough apart (>= ~0.62) that they do not
+        // overlap, or Blast's exact-support-coverage pass merges them into
+        // fewer pieces. A fixed 0.5 offset keeps them 1.0 apart regardless of
+        // member aspect ratio (the visual fragment size is computed separately
+        // by the physics layer from the member's box).
         for (uint32_t k = 0; k < kFragmentsPerChunk; ++k)
         {
             NvBlastChunkDesc& frag = chunks[structuralChunkCount + i * kFragmentsPerChunk + k];
@@ -112,72 +112,28 @@ bool BlastRuntime::initialize(const std::vector<NodeState>& nodes, int floors, i
         }
     }
 
+    // Bonds mirror the support edges: every physical contact between two
+    // members (or a member and the world) becomes one bond. A Ground edge
+    // (to == 0) bonds the member to the world node (Invalid). Bidirectional
+    // horizontal edges are deduplicated.
     std::vector<NvBlastBondDesc> bonds;
-    for (int floor = 0; floor < floors; ++floor)
+    std::set<std::pair<uint32_t, uint32_t>> seen;
+    for (const EdgeState& edge : edges)
     {
-        for (int slot = 0; slot < columnsPerFloor; ++slot)
-        {
-            NvBlastBondDesc bond = {};
-            // Vertical column/wall chain: upper column/wall rests on the one
-            // below (or on Ground for the first floor).
-            if (floor == 0)
-            {
-                bond.chunkIndices[0] = static_cast<uint32_t>(columnId(floor, slot, floors, columnsPerFloor, blocksPerFloor) - 1);
-                bond.chunkIndices[1] = Invalid;
-            }
-            else
-            {
-                bond.chunkIndices[0] = static_cast<uint32_t>(columnId(floor - 1, slot, floors, columnsPerFloor, blocksPerFloor) - 1);
-                bond.chunkIndices[1] = static_cast<uint32_t>(columnId(floor, slot, floors, columnsPerFloor, blocksPerFloor) - 1);
-            }
-            bond.bond.area = 1.0f;
-            bonds.push_back(bond);
-            // A slab bonds to its column/wall only when it exists (slot in
-            // block range).
-            if (slot < blocksPerFloor)
-            {
-                NvBlastBondDesc slabBond = {};
-                slabBond.chunkIndices[0] = static_cast<uint32_t>(blockId(floor, slot, blocksPerFloor) - 1);
-                slabBond.chunkIndices[1] = static_cast<uint32_t>(columnId(floor, slot, floors, columnsPerFloor, blocksPerFloor) - 1);
-                slabBond.bond.area = 1.0f;
-                bonds.push_back(slabBond);
-            }
-            if (slot > 0 && slot - 1 < blocksPerFloor && slot < blocksPerFloor)
-            {
-                NvBlastBondDesc slabSlab = {};
-                slabSlab.chunkIndices[0] = static_cast<uint32_t>(blockId(floor, slot - 1, blocksPerFloor) - 1);
-                slabSlab.chunkIndices[1] = static_cast<uint32_t>(blockId(floor, slot, blocksPerFloor) - 1);
-                slabSlab.bond.area = 1.0f;
-                bonds.push_back(slabSlab);
-            }
-        }
+        if (!edge.alive) continue;
+        const uint32_t a = edge.from == 0 ? Invalid : static_cast<uint32_t>(edge.from - 1);
+        const uint32_t b = edge.to == 0 ? Invalid : static_cast<uint32_t>(edge.to - 1);
+        if (a == Invalid && b == Invalid) continue;
+        const auto key = a < b ? std::make_pair(a, b) : std::make_pair(b, a);
+        if (!seen.insert(key).second) continue;
+        NvBlastBondDesc bond = {};
+        bond.chunkIndices[0] = a;
+        bond.chunkIndices[1] = b;
+        bond.bond.area = 1.0f;
+        bonds.push_back(bond);
     }
 
-    // Grid walls are extra load bearers appended after the columns. Each wall
-    // is chained vertically to the wall below it (or to the world on the
-    // ground story), mirroring the column chain so a destroyed wall's support
-    // bond below can be fractured.
-    for (int floor = 0; floor < floors; ++floor)
-    {
-        for (int slot = 0; slot < wallsPerFloor; ++slot)
-        {
-            NvBlastBondDesc bond = {};
-            if (floor == 0)
-            {
-                bond.chunkIndices[0] = static_cast<uint32_t>(wallId(floor, slot, floors, columnsPerFloor, blocksPerFloor, wallsPerFloor) - 1);
-                bond.chunkIndices[1] = Invalid;
-            }
-            else
-            {
-                bond.chunkIndices[0] = static_cast<uint32_t>(wallId(floor - 1, slot, floors, columnsPerFloor, blocksPerFloor, wallsPerFloor) - 1);
-                bond.chunkIndices[1] = static_cast<uint32_t>(wallId(floor, slot, floors, columnsPerFloor, blocksPerFloor, wallsPerFloor) - 1);
-            }
-            bond.bond.area = 1.0f;
-            bonds.push_back(bond);
-        }
-    }
-
-    // Seams: every member's 4 fragments are bonded to each other so the member
+    // Seams: every member's 8 fragments are bonded to each other so the member
     // behaves as one piece until the seams are fractured.
     for (uint32_t i = 0; i < structuralChunkCount; ++i)
     {
@@ -241,9 +197,14 @@ Nv::Blast::TkActor* BlastRuntime::findActorForChunk(uint32_t chunkIndex)
     return nullptr;
 }
 
-void BlastRuntime::fractureMember(const NodeState& node, int floors, int columnsPerFloor,
-                                  int blocksPerFloor, int wallsPerFloor, std::vector<FragmentSpawnInfo>& outFragments)
+void BlastRuntime::fractureMember(const NodeState& node, const std::vector<EdgeState>& edges,
+                                  int floors, int columnsPerFloor, int blocksPerFloor, int wallsPerFloor,
+                                  std::vector<FragmentSpawnInfo>& outFragments)
 {
+    (void)floors;
+    (void)columnsPerFloor;
+    (void)blocksPerFloor;
+    (void)wallsPerFloor;
     outFragments.clear();
     if (!m_asset || !m_group || m_structuralChunkCount == 0) return;
     using namespace Nv::Blast;
@@ -262,8 +223,8 @@ void BlastRuntime::fractureMember(const NodeState& node, int floors, int columns
 
     std::vector<NvBlastBondFractureData> commands;
 
-    // Break the seams of this member's fragment clique so its 4 fragments
-    // split into separate actors.
+    // Break the seams of this member's fragment clique so its fragments split
+    // into separate actors.
     const uint32_t fragBase = fragmentChunkIndex(nodeId, 0, m_structuralChunkCount);
     for (uint32_t a = 0; a < kFragmentsPerChunk; ++a)
     {
@@ -290,27 +251,25 @@ void BlastRuntime::fractureMember(const NodeState& node, int floors, int columns
         seamActor->applyFracture(nullptr, &seamCommands);
     }
 
-    // Break the member's bond to the support below (columns/walls only). This
-    // keeps the original "destroyed member detaches from the structure" Blast
-    // behaviour for the load-bearing members.
-    if (node.type == NodeType::Column || node.type == NodeType::Wall)
+    // Break a member's bond to the support below. The support below is whatever
+    // member this one rests on (the FROM side of a downward vertical edge), or
+    // the world for the ground story. This keeps the original "destroyed member
+    // detaches from the structure" behaviour, and it now also applies to floor
+    // plates: a plate that fails (e.g. laterally) genuinely separates from the
+    // support beneath it instead of shattering into cosmetic fragments only.
+    if (deriveRole(node.box) == MemberRole::VerticalBearing ||
+        deriveRole(node.box) == MemberRole::HorizontalPlate)
     {
         const uint32_t core = coreChunkIndex(nodeId);
-        // Grid walls live in their own id range after the columns; house walls
-        // share the column range. The support below is the same-kind member on
-        // the floor below (or the world node for the ground story).
         uint32_t lowerChunk = Invalid;
-        if (node.floor > 0)
+        for (const EdgeState& edge : edges)
         {
-            lowerChunk = node.type == NodeType::Wall && wallsPerFloor > 0
-                ? coreChunkIndex(static_cast<uint32_t>(
-                    wallId(node.floor - 1, node.slot, floors, columnsPerFloor, blocksPerFloor, wallsPerFloor)))
-                : coreChunkIndex(static_cast<uint32_t>(
-                    columnId(node.floor - 1, node.slot, floors, columnsPerFloor, blocksPerFloor)));
+            if (!edge.alive || edge.from != node.id) continue;
+            // Downward edge: this member is above its support.
+            lowerChunk = edge.to == 0 ? Invalid : static_cast<uint32_t>(edge.to - 1);
+            break;
         }
         const uint32_t graphCore = nodeOfChunk[core];
-        // Find the bond from the core to the lower chunk (or to the world node
-        // for the ground story) through the graph adjacency.
         uint32_t bondIndex = Invalid, fractureNode0 = Invalid, fractureNode1 = Invalid;
         for (uint32_t graphNode = 0; graphNode < graph.nodeCount; ++graphNode)
         {
@@ -319,7 +278,7 @@ void BlastRuntime::fractureMember(const NodeState& node, int floors, int columns
             {
                 const uint32_t adjacentNode = graph.adjacentNodeIndices[i];
                 const uint32_t other = adjacentNode < graph.nodeCount ? graph.chunkIndices[adjacentNode] : Invalid;
-                if ((node.floor == 0 && other == Invalid) || (node.floor > 0 && other == lowerChunk))
+                if (other == lowerChunk)
                 {
                     bondIndex = graph.adjacentBondIndices[i];
                     fractureNode0 = graphNode;

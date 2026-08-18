@@ -1,5 +1,6 @@
 #include "BlastSupportModel.h"
 #include "BlastRuntime.h"
+#include "ContactEdges.h"
 #include "LoadPathSolver.h"
 #include "SceneLayout.h"
 #include "SupportGraphSolver.h"
@@ -16,6 +17,15 @@
 namespace blast_demo
 {
 
+namespace
+{
+const char* nodeTypeName(const NodeState& node)
+{
+    if (node.id == 0) return "Ground";
+    const MemberRole role = deriveRole(node.box);
+    return role == MemberRole::VerticalBearing ? "Bearing" : "Plate";
+}
+}
 
 BlastSupportModel::BlastSupportModel(const StructuralConfig& config)
     : m_config(config)
@@ -55,11 +65,8 @@ bool BlastSupportModel::setPreset(StructuralPreset preset)
     switch (preset)
     {
     case StructuralPreset::Floors5Columns4: floors = 5; columns = 4; blocks = 4; break;
-    case StructuralPreset::Floors3Columns4: floors = 3; columns = 4; blocks = 4; break;
-    case StructuralPreset::Floors2Columns4: floors = 2; columns = 4; blocks = 4; break;
-    case StructuralPreset::Floors5Columns2: floors = 5; columns = 2; blocks = 2; break;
-    case StructuralPreset::House3Floors: floors = 3; columns = HouseWallsPerFloor; blocks = HouseSlabsPerFloor; break;
     case StructuralPreset::Grid4x4Floors4: floors = 4; columns = 4; blocks = 16; walls = 8; break;
+    case StructuralPreset::ShearPair: floors = 1; columns = 2; blocks = 4; break;
     default: return false;
     }
     if (floors > MaxFloors || columns > MaxWallsPerFloor || blocks > MaxBlocksPerFloor) return false;
@@ -86,18 +93,28 @@ void BlastSupportModel::reset()
     m_analysisTick = 0;
     m_pending.clear();
 
-    m_nodes.push_back({0, "Ground", NodeType::Ground, -1, 0, 100, 0, 0, 100000, true, true, NodeStatus::Safe});
+    m_nodes.push_back({0, "Ground", -1, 0, 100, 0, 0, 100000, true, true, NodeStatus::Safe});
     // IDs are also vector indices: Ground, then every block, then every
     // column/wall. Keep this order aligned with blockId()/columnId().
     for (int floor = 0; floor < m_activeFloors; ++floor)
     {
         for (int slot = 0; slot < m_activeBlocks; ++slot)
         {
-            const std::string slabName = isHouse()
-                ? "F" + std::to_string(floor + 1) + "-S" + std::to_string(slot + 1)
-                : "F" + std::to_string(floor + 1) + "-B" + std::to_string(slot + 1);
-            m_nodes.push_back({blockId(floor, slot), slabName,
-                               NodeType::Slab, floor, slot, 100, 25, 0, 290, true, true, NodeStatus::Safe});
+            const std::string slabName = "F" + std::to_string(floor + 1) + "-B" + std::to_string(slot + 1);
+            NodeState slab;
+            slab.id = blockId(floor, slot);
+            slab.name = slabName;
+            slab.floor = floor;
+            slab.slot = slot;
+            slab.health = 100;
+            slab.mass = 25;
+            slab.capacity = 290;
+            slab.shearCapacity = m_config.plateShearCapacity;
+            slab.alive = true;
+            slab.supported = true;
+            slab.status = NodeStatus::Safe;
+            slab.box = nodeLayout(floor, slot, LayoutKind::Slab, m_activeColumns, m_activeBlocks, false);
+            m_nodes.push_back(slab);
         }
     }
     for (int floor = 0; floor < m_activeFloors; ++floor)
@@ -106,16 +123,30 @@ void BlastSupportModel::reset()
         {
             const float capacity = isGrid() ? gridCapacityFor(floor)
                                             : (floor == 0 ? m_config.lowerColumnCapacity : m_config.upperColumnCapacity);
-            if (isHouse())
-            {
-                m_nodes.push_back({columnId(floor, slot), "F" + std::to_string(floor + 1) + "-W" + std::to_string(slot + 1),
-                                   NodeType::Wall, floor, slot, 100, floor == 0 ? 50.0f : 25.0f, 0, capacity, true, true, NodeStatus::Safe});
-            }
-            else
-            {
-                m_nodes.push_back({columnId(floor, slot), "F" + std::to_string(floor + 1) + "-C" + std::to_string(slot + 1),
-                                   NodeType::Column, floor, slot, 100, floor == 0 ? 50.0f : 25.0f, 0, capacity, true, true, NodeStatus::Safe});
-            }
+            NodeState col;
+            col.id = columnId(floor, slot);
+            col.name = "F" + std::to_string(floor + 1) + "-C" + std::to_string(slot + 1);
+            col.floor = floor;
+            col.slot = slot;
+            col.health = 100;
+            col.mass = floor == 0 ? 50.0f : 25.0f;
+            col.alive = true;
+            col.supported = true;
+            col.status = NodeStatus::Safe;
+            col.box = nodeLayout(floor, slot, LayoutKind::Column,
+                                 m_activeColumns, m_activeBlocks, false);
+            // Capacity scales with the member's cross-section area relative to
+            // the reference column section (the 0.3x0.3 1:1 column that the
+            // capacity values are tuned for), so a thicker member both carries
+            // more of the storey (area-weighted load) and can hold more.
+            const float refArea = (2.0f * 0.3f) * (2.0f * 0.3f);
+            const float memberArea = (2.0f * col.box.hx) * (2.0f * col.box.hz);
+            col.capacity = capacity * (memberArea / refArea);
+            // Lateral capacity scales with the member's own section like axial
+            // capacity, from the single plateShearCapacity source. Necessary so
+            // a vertical bearing does not shear on any trivial positive value.
+            col.shearCapacity = m_config.plateShearCapacity * (memberArea / refArea);
+            m_nodes.push_back(col);
         }
     }
     // Grid load-bearing walls, appended after every column: the north wall is
@@ -131,8 +162,22 @@ void BlastSupportModel::reset()
             const bool north = slot < 4;
             const std::string wallName = "F" + std::to_string(floor + 1) +
                 (north ? "-WN" : "-WW") + std::to_string(north ? slot : slot - 4);
-            m_nodes.push_back({wallId(floor, slot), wallName,
-                               NodeType::Wall, floor, slot, 100, floor == 0 ? 50.0f : 25.0f, 0, capacity, true, true, NodeStatus::Safe});
+            NodeState wall;
+            wall.id = wallId(floor, slot);
+            wall.name = wallName;
+            wall.floor = floor;
+            wall.slot = slot;
+            wall.health = 100;
+            wall.mass = floor == 0 ? 50.0f : 25.0f;
+            wall.alive = true;
+            wall.supported = true;
+            wall.status = NodeStatus::Safe;
+            wall.box = nodeLayout(floor, slot, LayoutKind::Wall, m_activeColumns, m_activeBlocks, false);
+            const float refArea = (2.0f * 0.3f) * (2.0f * 0.3f);
+            const float memberArea = (2.0f * wall.box.hx) * (2.0f * wall.box.hz);
+            wall.capacity = capacity * (memberArea / refArea);
+            wall.shearCapacity = m_config.plateShearCapacity * (memberArea / refArea);
+            m_nodes.push_back(wall);
         }
     }
     for (size_t index = 0; index < m_nodes.size(); ++index)
@@ -142,14 +187,10 @@ void BlastSupportModel::reset()
     }
     rebuildEdges();
     std::string blastError;
-    if (!m_blastRuntime->initialize(m_nodes, m_activeFloors, m_activeColumns, m_activeBlocks, m_activeWalls, blastError))
+    if (!m_blastRuntime->initialize(m_nodes, m_edges, m_activeFloors, m_activeColumns, m_activeBlocks, m_activeWalls, blastError))
         addEvent(blastError);
     m_loadPathSolver->route(m_nodes, m_edges, m_activeFloors, m_activeColumns, m_activeBlocks, m_activeWalls);
-    if (isHouse())
-        addEvent("Reset: " + std::to_string(m_activeFloors) + " floors, " +
-                 std::to_string(m_activeFloors * m_activeColumns) + " walls (house), " +
-                 std::to_string(m_activeColumns) + " load paths per floor.");
-    else if (isGrid())
+    if (isGrid())
         addEvent("Reset: " + std::to_string(m_activeFloors) + " floors, " +
                  std::to_string(m_activeBlocks) + " blocks + " +
                  std::to_string(m_activeColumns) + " columns + " +
@@ -169,7 +210,7 @@ bool BlastSupportModel::damageNode(int nodeId, float amount)
         return false;
 
     NodeState& node = m_nodes[static_cast<size_t>(nodeId)];
-    if (node.type == NodeType::Ground || !node.alive)
+    if (node.id == 0 || !node.alive)
         return false;
 
     saveSnapshot();
@@ -178,31 +219,21 @@ bool BlastSupportModel::damageNode(int nodeId, float amount)
     addEvent(node.name + " damage -> " + std::to_string(static_cast<int>(node.health)) + " HP");
     if (node.health == 0.0f)
     {
-        if (node.type == NodeType::Slab)
-        {
-            node.releasedLoad = node.mass;
-            if (node.floor + 1 < m_activeFloors && node.slot < m_activeColumns)
-            {
-                const int upperColumn = columnId(node.floor + 1, node.slot);
-                if (upperColumn < static_cast<int>(m_nodes.size()) && m_nodes[upperColumn].alive)
-                    node.releasedLoad += m_nodes[upperColumn].load;
-            }
-        }
-        else if (node.type == NodeType::Column || node.type == NodeType::Wall)
-        {
-            node.releasedLoad = std::max(node.mass, node.load);
-            node.releasedLoad += node.mass;
-        }
+        // The dead member's own weight is what a block above must now relay
+        // sideways (its lateral duty); this is NOT added to the storey vertical
+        // total (LoadPathSolver drops dead members), so use its own mass, not a
+        // pre-failure load share.
+        node.releasedLoad = node.mass;
         node.alive = false;
         addEvent(node.name + " failed; load path removed.");
         std::vector<FragmentSpawnInfo> fragments;
-        m_blastRuntime->fractureMember(node, m_activeFloors, m_activeColumns, m_activeBlocks, m_activeWalls, fragments);
+        m_blastRuntime->fractureMember(node, m_edges, m_activeFloors, m_activeColumns, m_activeBlocks, m_activeWalls, fragments);
         m_pendingFragments.insert(m_pendingFragments.end(), fragments.begin(), fragments.end());
         for (EdgeState& edge : m_edges)
         {
             const bool incident = edge.from == nodeId || edge.to == nodeId;
             const bool horizontal = edge.from > 0 && edge.to > 0 &&
-                m_nodes[edge.from].type == NodeType::Slab && m_nodes[edge.to].type == NodeType::Slab;
+                horizontalContact(m_nodes[edge.from].box, m_nodes[edge.to].box, kContactTol);
             // A destroyed block must keep its horizontal bonds alive so its
             // released load can route to neighboring blocks. Vertical support
             // edges are removed because the block can no longer carry load.
@@ -267,7 +298,7 @@ bool BlastSupportModel::undoLast()
     m_pendingFragments.clear();
     m_blastRuntime->destroy();
     std::string blastError;
-    if (!m_blastRuntime->initialize(m_nodes, m_activeFloors, m_activeColumns, m_activeBlocks, m_activeWalls, blastError))
+    if (!m_blastRuntime->initialize(m_nodes, m_edges, m_activeFloors, m_activeColumns, m_activeBlocks, m_activeWalls, blastError))
         addEvent(blastError);
     addEvent("Undo: restored previous structural state.");
     return true;
@@ -277,320 +308,17 @@ bool BlastSupportModel::undoLast()
 void BlastSupportModel::rebuildEdges()
 {
     m_edges.clear();
-    if (isHouse())
-    {
-        rebuildHouseEdges();
-        return;
-    }
-    if (isGrid())
-    {
-        rebuildGridEdges();
-        return;
-    }
-    for (int floor = 0; floor < m_activeFloors; ++floor)
-    {
-        for (int slot = 0; slot < m_activeColumns; ++slot)
-        {
-            const int block = blockId(floor, slot);
-            const int column = columnId(floor, slot);
-            m_edges.push_back({block, column, 160.0f, 0, m_nodes[column].alive});
-            if (floor == 0)
-                m_edges.push_back({column, 0, 300.0f, 0, m_nodes[column].alive});
-            else
-            {
-                // Columns do not connect directly to columns across floors.
-                // Their support is transferred through the lower floor block,
-                // then through that block's neighboring block connections.
-                m_edges.push_back({column, blockId(floor - 1, slot), 160.0f, 0,
-                                   m_nodes[column].alive && m_nodes[blockId(floor - 1, slot)].alive});
-            }
-            if (slot > 0)
-            {
-                const int left = blockId(floor, slot - 1);
-                // Horizontal bonds are bidirectional: a block can route its
-                // released load to either neighbor, and a support path can
-                // detour through neighboring blocks in both directions.
-                m_edges.push_back({left, block, 100.0f, 0, m_nodes[block].alive});
-                m_edges.push_back({block, left, 100.0f, 0, m_nodes[left].alive});
-            }
-        }
-    }
-}
-
-void BlastSupportModel::rebuildHouseEdges()
-{
-    constexpr float kContactTol = 0.1f;
-    const int total = static_cast<int>(m_nodes.size());
-
-    // Resolve every node's 3D box from its geometric layout. Connectivity is
-    // derived purely from these boxes, so a new house arrangement only needs
-    // a matching nodeLayout() (no per-slot edge table to keep in sync).
-    std::vector<BoxLayout> layouts(total);
-    for (int i = 0; i < total; ++i)
-        layouts[i] = nodeLayout(m_nodes[i], m_activeColumns, m_activeBlocks, true);
-
-    const auto overlap = [](float a0, float a1, float b0, float b1)
-    {
-        return std::min(a1, b1) - std::max(a0, b0);
-    };
-    const auto xOverlap = [&overlap](const BoxLayout& a, const BoxLayout& b)
-    {
-        return overlap(a.cx - a.hx, a.cx + a.hx, b.cx - b.hx, b.cx + b.hx);
-    };
-    const auto zOverlap = [&overlap](const BoxLayout& a, const BoxLayout& b)
-    {
-        return overlap(a.cz - a.hz, a.cz + a.hz, b.cz - b.hz, b.cz + b.hz);
-    };
-    const auto xzContact = [&](const BoxLayout& a, const BoxLayout& b)
-    {
-        return xOverlap(a, b) > -kContactTol && zOverlap(a, b) > -kContactTol;
-    };
-    const auto minY = [](const BoxLayout& l) { return l.cy - l.hy; };
-    const auto maxY = [](const BoxLayout& l) { return l.cy + l.hy; };
-    const auto addEdge = [this](int from, int to, float capacity, bool alive)
-    {
-        m_edges.push_back({from, to, capacity, 0.0f, alive});
-    };
-
-    for (int i = 1; i < total; ++i)
-    {
-        const NodeState& nodeI = m_nodes[i];
-        if (nodeI.type != NodeType::Wall && nodeI.type != NodeType::Slab) continue;
-        const BoxLayout& boxI = layouts[i];
-
-        // Ground-story walls stand on the ground plane (y == 0).
-        if (nodeI.type == NodeType::Wall && nodeI.floor == 0 && minY(boxI) <= kContactTol)
-            addEdge(i, 0, 300.0f, m_nodes[i].alive);
-
-        for (int j = i + 1; j < total; ++j)
-        {
-            const NodeState& nodeJ = m_nodes[j];
-            if (nodeJ.type != NodeType::Wall && nodeJ.type != NodeType::Slab) continue;
-            const BoxLayout& boxJ = layouts[j];
-
-            if (nodeI.type == NodeType::Wall && nodeJ.type == NodeType::Wall)
-            {
-                if (!xzContact(boxI, boxJ)) continue;
-                if (std::fabs(boxI.cy - boxJ.cy) < 0.5f)
-                {
-                    // Same-story wall segments that meet in the XZ plane
-                    // (adjacent segment or a corner) are bound both ways, so a
-                    // wall can route its load around to a live neighbor.
-                    const bool bothAlive = m_nodes[i].alive && m_nodes[j].alive;
-                    addEdge(i, j, 160.0f, bothAlive);
-                    addEdge(j, i, 160.0f, bothAlive);
-                }
-                else if (std::fabs(boxI.cy - boxJ.cy) < kFloorHeight + 0.5f &&
-                         std::fabs(boxI.cx - boxJ.cx) < kContactTol &&
-                         std::fabs(boxI.cz - boxJ.cz) < kContactTol)
-                {
-                    // Upper-story wall stacks on the wall below it in the same
-                    // lane: its bottom face lands on the lower wall's top face.
-                    const bool upperIsI = maxY(boxI) > maxY(boxJ);
-                    const int upper = upperIsI ? i : j;
-                    const int lower = upperIsI ? j : i;
-                    addEdge(upper, lower, 160.0f, m_nodes[upper].alive && m_nodes[lower].alive);
-                }
-            }
-            else if ((nodeI.type == NodeType::Wall && nodeJ.type == NodeType::Slab) ||
-                     (nodeI.type == NodeType::Slab && nodeJ.type == NodeType::Wall))
-            {
-                const bool iIsWall = nodeI.type == NodeType::Wall;
-                const int wallId = iIsWall ? i : j;
-                const int slabId = iIsWall ? j : i;
-                const BoxLayout& wallBox = iIsWall ? boxI : boxJ;
-                const BoxLayout& slabBox = iIsWall ? boxJ : boxI;
-                if (!xzContact(wallBox, slabBox)) continue;
-                // The floor plate rests on the top face of its own story's
-                // walls: the slab bottom reaches the wall top (slab sits
-                // inside the wall enclosure).
-                if (maxY(slabBox) >= maxY(wallBox) - kContactTol &&
-                    minY(slabBox) <= maxY(wallBox) + kContactTol)
-                    addEdge(slabId, wallId, 160.0f, m_nodes[wallId].alive);
-            }
-            else if (nodeI.type == NodeType::Slab && nodeJ.type == NodeType::Slab)
-            {
-                if (std::fabs(boxI.cy - boxJ.cy) >= 0.5f) continue;
-                // Neighboring slabs share a face; two slabs that only meet at
-                // the single center point of the tile grid are not bonded.
-                if (!xzContact(boxI, boxJ)) continue;
-                if (xOverlap(boxI, boxJ) <= 0.001f && zOverlap(boxI, boxJ) <= 0.001f) continue;
-                addEdge(i, j, 100.0f, m_nodes[i].alive);
-                addEdge(j, i, 100.0f, m_nodes[j].alive);
-            }
-        }
-    }
-}
-
-void BlastSupportModel::rebuildGridEdges()
-{
-    // Grid floor connectivity is derived from physical adjacency only:
-    //
-    // * A corner column bonds to the corner block at its corner plus the two
-    //   edge blocks immediately beside it (the 2x2 corner quadrant minus the
-    //   diagonal block). Interior blocks never bond to a column directly; they
-    //   reach a column only through the block-block bonds and the edge walls.
-    // * An upper column rests on the physically adjacent corner blocks of the
-    //   floor below, which route back to the lower column, so every column has
-    //   a Ground path: column -> lower corner blocks -> lower column -> Ground.
-    //   A single column failure therefore does not break the lane above it.
-    // * Ground-story columns stand on Ground.
-    // * Neighbouring blocks are bonded both ways so a block can route its load
-    //   (and its support path) around a dead bond through the live ones.
-    for (int floor = 0; floor < m_activeFloors; ++floor)
-    {
-        for (int slot = 0; slot < m_activeColumns; ++slot)
-        {
-            const int column = columnId(floor, slot);
-            if (floor == 0)
-                m_edges.push_back({column, 0, 300.0f, 0, m_nodes[column].alive});
-            else
-            {
-                // An upper column stands on the corner blocks of the floor
-                // plate below it. It is not directly supported by the
-                // same-lane lower column: its load reaches the lower plate,
-                // which redistributes through the lower corner blocks back to
-                // the lower column, so a single column failure does not break
-                // the lane above it.
-                for (int b = 0; b < m_activeBlocks; ++b)
-                {
-                    if (!gridBlockAdjacentToColumn(gridCol(b), gridRow(b), slot)) continue;
-                    const int lowerBlock = blockId(floor - 1, b);
-                    m_edges.push_back({column, lowerBlock, 160.0f, 0,
-                                       m_nodes[column].alive && m_nodes[lowerBlock].alive});
-                }
-            }
-        }
-        // Block-to-column: only the edge blocks physically adjacent to a
-        // corner column bond to it (their 2x2 corner quadrant minus the
-        // diagonal block). Interior blocks carry no direct column bond and
-        // must transmit their load through the block-block bonds to an edge
-        // block or to a north/west block that bonds to a wall.
-        for (int slot = 0; slot < m_activeBlocks; ++slot)
-        {
-            const int block = blockId(floor, slot);
-            const int col = gridCol(slot);
-            const int row = gridRow(slot);
-            for (int c = 0; c < m_activeColumns; ++c)
-            {
-                if (!gridBlockAdjacentToColumn(col, row, c)) continue;
-                const int column = columnId(floor, c);
-                m_edges.push_back({block, column, 160.0f, 0, m_nodes[column].alive});
-            }
-        }
-        for (int slot = 0; slot < m_activeBlocks; ++slot)
-        {
-            const int block = blockId(floor, slot);
-            const int col = gridCol(slot);
-            const int row = gridRow(slot);
-            if (col > 0)
-            {
-                const int left = blockId(floor, slot - 1);
-                m_edges.push_back({left, block, 100.0f, 0, m_nodes[block].alive});
-                m_edges.push_back({block, left, 100.0f, 0, m_nodes[left].alive});
-            }
-            if (row > 0)
-            {
-                const int back = blockId(floor, slot - kGridSize);
-                m_edges.push_back({back, block, 100.0f, 0, m_nodes[block].alive});
-                m_edges.push_back({block, back, 100.0f, 0, m_nodes[back].alive});
-            }
-        }
-        // Load-bearing walls rise through the story like a column: the
-        // ground-story wall stands on Ground and an upper wall stacks on the
-        // wall below it (vertical chain). The wall also bonds to the floor
-        // plate below it so a destroyed lower wall does not take the wall
-        // above it down. Each floor has 8 wall segments: slot 0..3 split the
-        // north wall into four pieces (one per grid column, along the north
-        // edge) and slot 4..7 split the west wall into four pieces (one per
-        // grid row, along the west edge).
-        for (int slot = 0; slot < m_activeWalls; ++slot)
-        {
-            const int wall = wallId(floor, slot);
-            if (floor == 0)
-                m_edges.push_back({wall, 0, 300.0f, 0, m_nodes[wall].alive});
-            else
-            {
-                const int lowerWall = wallId(floor - 1, slot);
-                m_edges.push_back({wall, lowerWall, 160.0f, 0,
-                                   m_nodes[wall].alive && m_nodes[lowerWall].alive});
-                // Directly below the wall sits the plate band it follows: a
-                // north segment at grid column c rests on the north-row block
-                // (c,0); a west segment at grid row r rests on the west-column
-                // block (0,r).
-                const bool north = slot < 4;
-                const int segment = north ? slot : slot - 4;
-                for (int b = 0; b < m_activeBlocks; ++b)
-                {
-                    const bool beneath = north ? (gridCol(b) == segment && gridRow(b) == 0)
-                                               : (gridCol(b) == 0 && gridRow(b) == segment);
-                    if (!beneath) continue;
-                    const int lowerBlock = blockId(floor - 1, b);
-                    m_edges.push_back({wall, lowerBlock, 160.0f, 0,
-                                       m_nodes[wall].alive && m_nodes[lowerBlock].alive});
-                }
-            }
-            // Same-story wall bonds: adjacent north segments connect both ways,
-            // adjacent west segments connect both ways, and the north wall's
-            // west segment meets the west wall's north segment at the
-            // north-west corner of the slab.
-            const bool north = slot < 4;
-            if (north)
-            {
-                if (slot < 3)
-                {
-                    const int next = wallId(floor, slot + 1);
-                    const bool bothAlive = m_nodes[wall].alive && m_nodes[next].alive;
-                    m_edges.push_back({wall, next, 160.0f, 0, bothAlive});
-                    m_edges.push_back({next, wall, 160.0f, 0, bothAlive});
-                }
-                if (slot == 0)
-                {
-                    const int corner = wallId(floor, 4);
-                    const bool bothAlive = m_nodes[wall].alive && m_nodes[corner].alive;
-                    m_edges.push_back({wall, corner, 160.0f, 0, bothAlive});
-                    m_edges.push_back({corner, wall, 160.0f, 0, bothAlive});
-                }
-            }
-            else if (slot < 7)
-            {
-                const int next = wallId(floor, slot + 1);
-                const bool bothAlive = m_nodes[wall].alive && m_nodes[next].alive;
-                m_edges.push_back({wall, next, 160.0f, 0, bothAlive});
-                m_edges.push_back({next, wall, 160.0f, 0, bothAlive});
-            }
-        }
-        // Blocks on the north row can detour their load through the north wall
-        // segment above their column, and blocks on the west column through the
-        // west wall segment beside their row.
-        for (int slot = 0; slot < m_activeBlocks; ++slot)
-        {
-            const int block = blockId(floor, slot);
-            const int col = gridCol(slot);
-            const int row = gridRow(slot);
-            if (row == 0)
-            {
-                const int wall = wallId(floor, col);
-                m_edges.push_back({block, wall, 100.0f, 0, m_nodes[wall].alive});
-            }
-            if (col == 0)
-            {
-                const int wall = wallId(floor, 4 + row);
-                m_edges.push_back({block, wall, 100.0f, 0, m_nodes[wall].alive});
-            }
-        }
-    }
+    m_edges = rebuildEdgesFromContacts(m_nodes);
 }
 
 float BlastSupportModel::gridCapacityFor(int floor) const
 {
     // Whole-floor load sharing accumulates downward: each floor contributes its
     // live block, column and wall masses, so a lower member carries the
-    // stories above it. With 12 bearers per floor (4 columns + 8 walls),
-    // losing a single member drops the shared load by less than one member
-    // mass, while losing two raises every survivor's share above the capacity.
-    // The factor sits between per-bearer shares of 11 and 10 survivors so ten
-    // or more live members hold the floor and losing two overloads it.
+    // stories above it. The capacity is the reference column's share of that
+    // total: with area-weighted load distribution every bearer's utilisation
+    // is the same, and the 0.051 factor sits between "one column destroyed
+    // stays under capacity" and "two columns destroyed overload the survivors".
     float total = 0.0f;
     for (int f = m_activeFloors - 1; f >= floor; --f)
     {
@@ -599,8 +327,195 @@ float BlastSupportModel::gridCapacityFor(int floor) const
                  static_cast<float>(m_activeColumns) * memberMass +
                  static_cast<float>(m_activeWalls) * memberMass;
     }
-    return total * 0.0915f;
+    return total * 0.040f;
 }
+
+void BlastSupportModel::setPlateShearCapacity(float loadUnits)
+{
+    m_config.plateShearCapacity = std::max(loadUnits, 0.0f);
+    // Re-derive every member's lateral (shear) capacity, mirroring reset():
+    // a plate keeps the nominal config value; a vertical bearing scales with
+    // its own section like its axial capacity, so a thicker member resists
+    // more lateral load.
+    static constexpr float kRefArea = (2.0f * 0.3f) * (2.0f * 0.3f);
+    for (NodeState& node : m_nodes)
+    {
+        if (node.id == 0) continue;
+        if (deriveRole(node.box) == MemberRole::VerticalBearing)
+        {
+            const float memberArea = (2.0f * node.box.hx) * (2.0f * node.box.hz);
+            node.shearCapacity = m_config.plateShearCapacity * (memberArea / kRefArea);
+        }
+        else
+        {
+            node.shearCapacity = m_config.plateShearCapacity;
+        }
+    }
+}
+
+// Correct lateral-shear model (continuous-beam / diaphragm): destroying a support
+// makes its released load travel sideways along the plate band toward the nearest
+// SURVIVING bearing. A floor band acts like a simply-supported continuous member,
+// so its shear force is largest near the surviving support and smallest at the
+// dead / free end — the surviving column's plate must carry the accumulated load
+// of every unsupported plate between it and the failure. We walk each source
+// plate toward the nearest surviving bearing, accumulating a "transported" load
+// that grows as we approach the support; each plate on that path is credited the
+// load it must pass sideways, so the plate next to the surviving column sees the
+// peak shear and the dead column's plate sees the least.
+void BlastSupportModel::detectLateralShear(std::vector<int>& overloaded,
+                                           std::vector<float>& lateralValues)
+{
+    overloaded.clear();
+    lateralValues.clear();
+    std::vector<float> lateral(m_nodes.size(), 0.0f);
+    const int n = static_cast<int>(m_nodes.size());
+
+    auto isAliveBearing = [&](int id) {
+        return id > 0 && id < n && m_nodes[id].alive &&
+               deriveRole(m_nodes[id].box) == MemberRole::VerticalBearing;
+    };
+    auto isPlate = [&](int id) {
+        return id > 0 && id < n && m_nodes[id].alive &&
+               deriveRole(m_nodes[id].box) == MemberRole::HorizontalPlate;
+    };
+    auto sameStorey = [&](const NodeState& a, const NodeState& b) {
+        return std::fabs(a.box.cy - b.box.cy) <= 1e-3f;
+    };
+
+    // Source: for each alive plate, the released load of the dead supports directly
+    // beneath it (its own weight no longer has a vertical path) plus its own mass,
+    // which it must push sideways.
+    std::vector<float> sourceLoad(m_nodes.size(), 0.0f);
+    std::vector<int> sourcePlate;
+    for (const NodeState& node : m_nodes)
+    {
+        if (!isPlate(node.id)) continue;
+        float duty = 0.0f;
+        for (const EdgeState& edge : m_edges)
+        {
+            if (edge.from != node.id) continue;
+            if (edge.to <= 0 || edge.to >= n) continue;
+            const NodeState& support = m_nodes[edge.to];
+            if (support.alive) continue;
+            if (std::fabs(node.box.minY() - support.box.maxY()) > kContactTol) continue;
+            duty += support.releasedLoad;
+        }
+        if (duty > 0.0f)
+        {
+            sourceLoad[node.id] = duty;
+            sourcePlate.push_back(node.id);
+        }
+    }
+    if (sourcePlate.empty()) goto done;
+
+    // For each source plate, walk toward the nearest surviving bearing along the
+    // horizontal plate path, accumulating the transported load. We try both the X
+    // and Z axes; each is a candidate "run" direction. The load splits evenly
+    // among the directions that lead to a surviving bearing.
+    for (int sid : sourcePlate)
+    {
+        const NodeState& S = m_nodes[sid];
+        const float load = sourceLoad[sid];
+        if (load <= 0.0f) continue;
+
+        // Neighbours of S that are same-storey plates (horizontal contact).
+        auto plateNeighbours = [&](int id) {
+            std::vector<int> out;
+            const NodeState& a = m_nodes[id];
+            for (int j = 1; j < n; ++j)
+            {
+                if (!isPlate(j) || j == id) continue;
+                if (!sameStorey(a, m_nodes[j])) continue;
+                if (!horizontalContact(a.box, m_nodes[j].box, kContactTol)) continue;
+                out.push_back(j);
+            }
+            return out;
+        };
+
+        // Distance from a plate to the nearest surviving bearing on its floor
+        // (match by floor index, not cy — plates and the columns that support
+        // them sit at different heights in the same storey).
+        auto nearestSupportDistSq = [&](int id) -> float {
+            const NodeState& a = m_nodes[id];
+            float best = -1.0f;
+            for (int j = 1; j < n; ++j)
+            {
+                if (!isAliveBearing(j) || m_nodes[j].floor != a.floor) continue;
+                const float dx = a.box.cx - m_nodes[j].box.cx;
+                const float dz = a.box.cz - m_nodes[j].box.cz;
+                const float d2 = dx * dx + dz * dz;
+                if (best < 0.0f || d2 < best) best = d2;
+            }
+            return best;
+        };
+
+        // Dedicated BFS toward the nearest surviving bearing: accumulate load on
+        // the path from S outward, adding to each plate then growing transported.
+        // We perform a flood where the accumulated load is carried to the support.
+        // Treat the whole connected component as a set of plates; walk from S and
+        // keep crediting accumulated load outward, weighting by how close to the
+        // surviving support each plate is (closer => passes more).
+        // Load splits evenly across the number of distinct nearest-bearing directions.
+        std::vector<int> comp;
+        std::vector<int> stack{sid};
+        std::vector<char> seen(n, 0); seen[sid] = 1;
+        while (!stack.empty()) { int c = stack.back(); stack.pop_back(); comp.push_back(c);
+            for (int nb : plateNeighbours(c)) if (!seen[nb]) { seen[nb] = 1; stack.push_back(nb); } }
+        if (comp.empty()) continue;
+
+        // Distances of component plates to nearest support; the plate at the peak
+        // (nearest to the surviving support) takes the largest share, dead-end the
+        // smallest. Use inverse-distance weighting from the surviving support so the
+        // nearest plate to the support bears the most.
+        std::vector<float> d2(comp.size());
+        float maxD2 = 0.0f;
+        bool anySupport = false;
+        for (size_t i = 0; i < comp.size(); ++i)
+        {
+            d2[i] = nearestSupportDistSq(comp[i]);
+            if (d2[i] >= 0.0f) { anySupport = true; if (d2[i] > maxD2) maxD2 = d2[i]; }
+        }
+        if (!anySupport) continue;
+        // Weight: closer to support (smaller d2) => larger shear pass-through.
+        float wsum = 0.0f;
+        for (size_t i = 0; i < comp.size(); ++i)
+        {
+            if (d2[i] >= 0.0f) wsum += (maxD2 + 1.0f) - d2[i];
+        }
+        if (wsum <= 0.0f) continue;
+        for (size_t i = 0; i < comp.size(); ++i)
+            if (d2[i] >= 0.0f)
+                lateral[comp[i]] += load * ((maxD2 + 1.0f) - d2[i]) / wsum;
+        // The plates with a surviving bearing directly beneath (d2==0) are not
+        // shear-active themselves; they just pass through — but for display we keep
+        // their credited share, which the user can read.
+
+        // ALSO credit the direct source plate fully so the shown per-plate shear is
+        // never zero at the failure point (it still must relay its own load) — but
+        // keep the support-adjacent plates dominant. (Already covered by weights.)
+    }
+
+done:
+    // Stash the accumulated lateral on each node so the inspector / 3D view and
+    // tests can read it directly.
+    for (int i = 0; i < n; ++i)
+        m_nodes[i].lateralShear = lateral[i];
+
+    // Pass 2: only alive plates shear-fail when their lateral share exceeds
+    // their shear capacity. Values are in load units to match shearCapacity.
+    for (const NodeState& node : m_nodes)
+    {
+        if (node.id == 0 || !node.alive ||
+            deriveRole(node.box) != MemberRole::HorizontalPlate) continue;
+        if (lateral[node.id] > node.shearCapacity)
+        {
+            overloaded.push_back(node.id);
+            lateralValues.push_back(lateral[node.id]);
+        }
+    }
+}
+
 
 void BlastSupportModel::damageColumn(int floor, int slot, float amount)
 {
@@ -649,7 +564,8 @@ void BlastSupportModel::setCascadeDelay(float seconds)
     m_cascadeDelay = seconds < 0.0f ? 0.0f : seconds;
 }
 
-void BlastSupportModel::scheduleFail(int nodeId, NodeStatus status)
+void BlastSupportModel::scheduleFail(int nodeId, NodeStatus status, const std::string& reason,
+                                    float snapN, float snapV, float snapM)
 {
     if (nodeId < 0 || nodeId >= static_cast<int>(m_nodes.size()) || !m_nodes[nodeId].alive)
         return;
@@ -664,33 +580,79 @@ void BlastSupportModel::scheduleFail(int nodeId, NodeStatus status)
     pending.dueTime = m_currentTime + m_cascadeDelay + (m_cascadeDelay > 0.0f ? m_pendingStagger : 0.0f);
     m_pendingStagger += m_cascadeDelay > 0.0f ? 0.05f : 0.0f;
     pending.status = status;
+    pending.reason = reason;
+    if (status == NodeStatus::Overloaded)
+    {
+        if (snapN != 0.0f || snapV != 0.0f || snapM != 0.0f)
+        {
+            pending.snapN = snapN;
+            pending.snapV = snapV;
+            pending.snapM = snapM;
+        }
+    }
     m_pending.push_back(pending);
     addEvent("Scheduled " + m_nodes[nodeId].name +
-             (status == NodeStatus::Overloaded ? " overload" : " unsupported") +
+             " [" + nodeTypeName(m_nodes[nodeId]) +
+             (status == NodeStatus::Overloaded ? "] overload" : "] unsupported") +
+             (reason.empty() ? "" : " (" + reason + ")") +
              " in " + std::to_string(m_cascadeDelay) + " s");
 }
 
-void BlastSupportModel::executePendingFail(int nodeId, NodeStatus status)
+void BlastSupportModel::executePendingFail(int nodeId, NodeStatus status, const std::string& reason,
+                                           float snapN, float snapV, float snapM)
 {
     NodeState& node = m_nodes[nodeId];
-    if (node.type == NodeType::Slab) node.releasedLoad = node.mass;
+    node.releasedLoad = node.mass;
     node.health = 0.0f;
     node.alive = false;
     node.supported = false;
     node.status = status;
-    addEvent(node.name + " failed (" +
-             (status == NodeStatus::Overloaded ? "overloaded" : "unsupported") +
-             "); load path removed.");
+    const std::string detail = reason.empty()
+        ? std::string(status == NodeStatus::Overloaded ? "overloaded" : "unsupported")
+        : (status == NodeStatus::Unsupported ? "unsupported" : reason + " overloaded");
+    // Attach the measured force and its threshold from the snapshot taken when
+    // the member was scheduled, so the log shows how far it exceeded the limit
+    // (e.g. M=1912.95/900.00 N*m) instead of a later solve's value.
+    std::string values;
+    if (status == NodeStatus::Overloaded)
+    {
+        char buf[128];
+        if (reason == "axial")
+        {
+            const float cap = node.capacity * 9.81f;
+            std::snprintf(buf, sizeof(buf), "  N=%.2f/%.2f N", snapN, cap);
+        }
+        else if (reason == "shear")
+        {
+            // The failure criterion uses node.shearCapacity (which is the
+            // StructuralConfig::plateShearCapacity for a plate), so the log must
+            // compare against that same threshold. snapV is in Newtons (convert
+            // to load units on input), so convert the threshold to Newtons too,
+            // matching the axial log below.
+            std::snprintf(buf, sizeof(buf), "  V=%.2f/%.2f N", snapV, node.shearCapacity * 9.81f);
+        }
+        else
+        {
+            std::snprintf(buf, sizeof(buf), "  N=%.2f V=%.2f M=%.2f", snapN, snapV, snapM);
+        }
+        values = buf;
+    }
+    addEvent(node.name + " [" + nodeTypeName(node) + "] failed (" + detail +
+             "); load path removed." + values);
     std::vector<FragmentSpawnInfo> fragments;
-    m_blastRuntime->fractureMember(node, m_activeFloors, m_activeColumns, m_activeBlocks, m_activeWalls, fragments);
+    m_blastRuntime->fractureMember(node, m_edges, m_activeFloors, m_activeColumns, m_activeBlocks, m_activeWalls, fragments);
     m_pendingFragments.insert(m_pendingFragments.end(), fragments.begin(), fragments.end());
     for (EdgeState& edge : m_edges)
     {
         const bool incident = edge.from == nodeId || edge.to == nodeId;
         if (!incident) continue;
         const bool horizontal = edge.from > 0 && edge.to > 0 &&
-            m_nodes[edge.from].type == NodeType::Slab && m_nodes[edge.to].type == NodeType::Slab;
-        if (status == NodeStatus::Overloaded || !horizontal) edge.alive = false;
+            horizontalContact(m_nodes[edge.from].box, m_nodes[edge.to].box, kContactTol);
+        // On any death path, only the vertical incident edges are cut: a
+        // ruined plate must keep its horizontal bonds so its released load can
+        // still detour sideways to neighbours (matches damageNode and the
+        // documented "destroyed block keeps horizontal bonds" intent).
+        if (!horizontal) edge.alive = false;
     }
     markIncidentNeighborsDirty(nodeId);
 }
@@ -709,7 +671,8 @@ void BlastSupportModel::update(float time)
             {
                 if (m_nodes[it->nodeId].alive)
                 {
-                    executePendingFail(it->nodeId, it->status);
+                    executePendingFail(it->nodeId, it->status, it->reason,
+                                       it->snapN, it->snapV, it->snapM);
                     executed = true;
                 }
                 it = m_pending.erase(it);
@@ -739,20 +702,75 @@ void BlastSupportModel::tickAnalysis()
         for (int id : affected)
         {
             NodeState& node = m_nodes[id];
-            if (node.type != NodeType::Ground && node.alive &&
+            if (node.id != 0 && node.alive &&
                 !m_graphSolver->hasGroundPath(id, m_nodes, m_edges))
             {
-                if (node.type == NodeType::Slab) node.releasedLoad = node.mass;
+                node.releasedLoad = node.mass;
                 scheduleFail(id, NodeStatus::Unsupported);
             }
         }
-        const std::vector<int> overloaded = m_loadPathSolver->route(
-            m_nodes, m_edges, m_activeFloors, m_activeColumns, m_activeBlocks, m_activeWalls, false);
-        for (int id : overloaded) scheduleFail(id, NodeStatus::Overloaded);
+        std::vector<int> overloaded;
+        // Per-floor uniform load distribution (scheme 1): each storey gathers
+        // the weight of the storeys above plus its own masses and divides it
+        // equally among its surviving vertical bearings. A bearing fails when
+        // its share exceeds its capacity. This is the driver of failure.
+        overloaded = m_loadPathSolver->route(
+            m_nodes, m_edges, m_activeFloors, m_activeColumns, m_activeBlocks,
+            m_activeWalls, false);
+        // Lateral (horizontal) shear detection, correct physics: when a
+        // support directly beneath a plate dies, the plate must relay that
+        // support's released load sideways to its same-storey neighbours (via
+        // horizontalContact edges), area-weighted like the storey redistribution
+        // above. The relaying plate and each neighbour accumulate a lateral
+        // force; only a plate shear-fails, when its share exceeds its shear
+        // capacity. This replaces the old anti-physical loop that made the
+        // member *above* a dead support the shear victim and never actually
+        // transferred the load sideways (see detectLateralShear).
+        std::vector<int> shearOverloaded;
+        std::vector<float> shearValues;
+        detectLateralShear(shearOverloaded, shearValues);
+        // The whole-storey redistribution couples every member, so a heavy
+        // overload near the top also raises the load of the intact storeys
+        // below. If we scheduled all of them at once the whole building would
+        // pop on the first frame. Collapse from the top down: when several
+        // storeys are overloaded only the highest is scheduled this pass; once
+        // it fails the solver re-runs and the storeys below it recover. A
+        // single overloaded storey (e.g. the surviving ground column after its
+        // neighbours are destroyed) is always scheduled.
+        std::vector<int> toSchedule = overloaded;
+        if (!overloaded.empty())
+        {
+            int minFloor = std::numeric_limits<int>::max();
+            int maxFloor = -1;
+            for (int id : overloaded)
+                if (id >= 0 && id < static_cast<int>(m_nodes.size()))
+                {
+                    minFloor = std::min(minFloor, m_nodes[id].floor);
+                    maxFloor = std::max(maxFloor, m_nodes[id].floor);
+                }
+            if (minFloor != maxFloor)
+            {
+                toSchedule.clear();
+                for (int id : overloaded)
+                    if (id >= 0 && id < static_cast<int>(m_nodes.size()) &&
+                        m_nodes[id].floor == maxFloor)
+                        toSchedule.push_back(id);
+            }
+        }
+        for (int id : toSchedule)
+        {
+            if (id < 0 || id >= static_cast<int>(m_nodes.size())) continue;
+            scheduleFail(id, NodeStatus::Overloaded);
+        }
+        // Shear failures are scheduled on their own floor; a plate never
+        // overloads a storey below it, so no top-down filter is needed.
+        for (size_t i = 0; i < shearOverloaded.size(); ++i)
+            scheduleFail(shearOverloaded[i], NodeStatus::Overloaded, "shear",
+                         0.0f, shearValues[i] * 9.81f, 0.0f);
         for (EdgeState& edge : m_edges)
         {
             const bool horizontal = edge.from > 0 && edge.to > 0 &&
-                m_nodes[edge.from].type == NodeType::Slab && m_nodes[edge.to].type == NodeType::Slab;
+                horizontalContact(m_nodes[edge.from].box, m_nodes[edge.to].box, kContactTol);
             if (horizontal)
                 edge.alive = edge.alive && m_nodes[edge.to].alive;
             else

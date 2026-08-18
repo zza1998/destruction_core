@@ -1,6 +1,7 @@
 #pragma once
 
 #include "BlastRuntime.h"
+#include "NodeTypes.h"
 
 #include <string>
 #include <cstdint>
@@ -13,50 +14,25 @@ namespace blast_demo
 class SupportGraphSolver;
 class LoadPathSolver;
 
-enum class NodeType { Slab, Column, Ground, Wall };
-enum class NodeStatus { Safe, Warning, Overloaded, Broken, Unsupported, Falling };
-
-struct NodeState
-{
-    int id = 0;
-    std::string name;
-    NodeType type = NodeType::Column;
-    int floor = 0;
-    int slot = 0;
-    float health = 100.0f;
-    float mass = 0.0f;
-    float load = 0.0f;
-    float capacity = 0.0f;
-    bool alive = true;
-    bool supported = true;
-    NodeStatus status = NodeStatus::Safe;
-    float releasedLoad = 0.0f;
-};
-
-struct EdgeState
-{
-    int from = 0;
-    int to = 0;
-    float capacity = 0.0f;
-    float load = 0.0f;
-    bool alive = true;
-};
-
 struct StructuralConfig
 {
     float lowerColumnCapacity = 800.0f;
     float upperColumnCapacity = 290.0f;
     float overloadFailureRatio = 1.0f;
+    // Horizontal shear capacity of a floor plate, in load units (mass). A plate
+    // fails when the vertical load released by dead columns above it must be
+    // transferred sideways through the plate (shear) and exceeds this limit.
+    // Sized larger than a single support's released share so one destroyed
+    // support does NOT shear the plate; two or more simultaneous failures
+    // accumulate and snap it.
+    float plateShearCapacity = 300.0f;
 };
 
 enum class StructuralPreset
 {
     Floors5Columns4,
-    Floors3Columns4,
-    Floors2Columns4,
-    Floors5Columns2,
-    House3Floors,
-    Grid4x4Floors4
+    Grid4x4Floors4,
+    ShearPair       // 单层双板对：用于测试横向剪切中继 (detectLateralShear)
 };
 
 class BlastSupportModel
@@ -66,8 +42,6 @@ public:
     static constexpr int MaxColumnsPerFloor = 4;
     static constexpr int MaxWallsPerFloor = 8;
     static constexpr int MaxBlocksPerFloor = 16;
-    static constexpr int HouseWallsPerFloor = 8;
-    static constexpr int HouseSlabsPerFloor = 4;
 
     explicit BlastSupportModel(const StructuralConfig& config = StructuralConfig());
     ~BlastSupportModel();
@@ -75,11 +49,13 @@ public:
     void reset();
     bool setPreset(StructuralPreset preset);
     StructuralPreset preset() const { return m_preset; }
-    bool isHouse() const { return m_preset == StructuralPreset::House3Floors; }
     // Grid layout: every floor has more blocks than columns (blocks tile the
     // floor in a 4x4 grid and the columns stand at its corners), so a column
-    // carries several blocks instead of one.
-    bool isGrid() const { return m_activeBlocks > m_activeColumns; }
+    // carries several blocks instead of one. Only the actual grid preset counts:
+    // ShearPair also uses blocks>columns (4 mid-span plates over 2 end columns)
+    // but is NOT a 4x4 corner-column grid, so it must not inherit the grid
+    // whole-floor capacity scheme.
+    bool isGrid() const { return m_preset == StructuralPreset::Grid4x4Floors4; }
     int activeFloors() const { return m_activeFloors; }
     int activeColumns() const { return m_activeColumns; }
     int activeBlocks() const { return m_activeBlocks; }
@@ -105,6 +81,9 @@ public:
     uint32_t seed() const { return m_seed; }
     bool progressiveCollapse() const { return m_progressiveCollapse; }
     const StructuralConfig& config() const { return m_config; }
+    // Single source for the lateral (shear) failure threshold. Updates the
+    // config and re-derives every member's shearCapacity from its geometry.
+    void setPlateShearCapacity(float loadUnits);
 
     // Fragments spawned by destroyed members since the last call. PhysicsWorld
     // consumes this to create visual debris bodies.
@@ -124,21 +103,34 @@ private:
     };
 
     void rebuildEdges();
-    void rebuildHouseEdges();
-    void rebuildGridEdges();
     float gridCapacityFor(int floor) const;
+    // Lateral-shear detector: finds plates that must relay a dead support's
+    // released load sideways to same-storey neighbours (area-weighted). Only
+    // plates accumulate and can shear-fail. Accumulates per-node lateral into
+    // NodeState::lateralShear (diagnostic) and writes the pass-local output
+    // vectors (overloaded ids + lateral force in load units).
+    void detectLateralShear(std::vector<int>& overloaded, std::vector<float>& lateralValues);
     void markDirty(int nodeId);
     void markIncidentNeighborsDirty(int nodeId);
     void addEvent(const std::string& text);
     void saveSnapshot();
-    void scheduleFail(int nodeId, NodeStatus status);
-    void executePendingFail(int nodeId, NodeStatus status);
+    void scheduleFail(int nodeId, NodeStatus status, const std::string& reason = "",
+                      float snapN = 0.0f, float snapV = 0.0f, float snapM = 0.0f);
+    void executePendingFail(int nodeId, NodeStatus status, const std::string& reason = "",
+                            float snapN = 0.0f, float snapV = 0.0f, float snapM = 0.0f);
 
     struct PendingFail
     {
         int nodeId = -1;
         float dueTime = 0.0f;
         NodeStatus status = NodeStatus::Unsupported;
+        std::string reason;
+        // Snapshot of the forces at scheduling time, so the failure log shows
+        // the actual values that triggered the overload (not the latest solve,
+        // which may have changed by the time the failure executes).
+        float snapN = 0.0f;
+        float snapV = 0.0f;
+        float snapM = 0.0f;
     };
 
     std::vector<NodeState> m_nodes;

@@ -2,7 +2,7 @@
 
 #include "BlastSupportModel.h"
 #include "GLFunctions.h"
-#include "OpenGLScene.h"
+#include "SceneTypes.h"
 
 #include <glm/glm.hpp>
 
@@ -33,6 +33,9 @@ public:
 
     void setShowSupportLinks(bool show) { m_showSupportLinks = show; }
     bool showSupportLinks() const { return m_showSupportLinks; }
+
+    void setLinkBallSize(float s) { m_linkBallSize = s; }
+    float linkBallSize() const { return m_linkBallSize; }
 
     int pick(const BlastSupportModel& model, const PhysicsWorld& physics, float screenX, float screenY,
              const ViewportGeometry& viewport, float framebufferScale) const;
@@ -77,5 +80,6 @@ private:
     static constexpr float kDebrisLifetime = 5.0f;
     bool m_showLabels = true;
     bool m_showSupportLinks = false;
+    float m_linkBallSize = 0.22f;
 };
 }

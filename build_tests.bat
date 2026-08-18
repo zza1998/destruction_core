@@ -4,12 +4,35 @@ set "DEMO_DIR=%~dp0"
 if "%BLAST_ROOT%"=="" set "BLAST_ROOT=%DEMO_DIR%.."
 set "OUT=%DEMO_DIR%build"
 if not exist "%OUT%" mkdir "%OUT%"
+
+REM Auto-load the Visual Studio compiler environment so this script works from
+REM a plain cmd window (no need to open the Developer Command Prompt first).
+where cl >nul 2>nul
+if errorlevel 1 (
+  if exist "%ProgramFiles%\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat" (
+    call "%ProgramFiles%\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat" >nul
+  ) else if exist "%ProgramFiles(x86)%\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" (
+    call "%ProgramFiles(x86)%\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" >nul
+  ) else if exist "%ProgramFiles%\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" (
+    call "%ProgramFiles%\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" >nul
+  ) else if exist "%ProgramFiles(x86)%\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" (
+    call "%ProgramFiles(x86)%\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" >nul
+  ) else if exist "%ProgramFiles%\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" (
+    call "%ProgramFiles%\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" >nul
+  ) else if exist "%ProgramFiles(x86)%\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" (
+    call "%ProgramFiles(x86)%\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" >nul
+  )
+)
+where cl >nul 2>nul
+if errorlevel 1 (
+  echo No Visual Studio 2022 C++ toolchain found. Install VS2022 with the
+  echo "Desktop development with C++" workload, or run this from a Developer Command Prompt.
+  exit /b 1
+)
 set "SDK=%BLAST_ROOT%\_build\windows-x86_64\release\blast-sdk"
 set "GLFW=%BLAST_ROOT%\..\flow\external\glfw"
 set "IMGUI=%BLAST_ROOT%\..\flow\external\imgui"
-cl /nologo /std:c++14 /EHsc /W4 /DNDEBUG /I"%DEMO_DIR%include" /I"%DEMO_DIR%src" /I"%BLAST_ROOT%\include" /I"%BLAST_ROOT%\include\toolkit" /I"%BLAST_ROOT%\include\globals" /I"%BLAST_ROOT%\include\lowlevel" /I"%BLAST_ROOT%\include\shared\NvFoundation" /Fe:"%OUT%\StructuralModelTests.exe" "%DEMO_DIR%tests\StructuralModelTests.cpp" "%DEMO_DIR%src\BlastSupportModel.cpp" "%DEMO_DIR%src\BlastRuntime.cpp" "%DEMO_DIR%src\SupportGraphSolver.cpp" "%DEMO_DIR%src\LoadPathSolver.cpp" "%DEMO_DIR%src\ReducedStaticsSolver.cpp" /link /LIBPATH:"%SDK%\bin" NvBlastTk.lib NvBlast.lib NvBlastGlobals.lib
-if errorlevel 1 exit /b 1
-cl /nologo /std:c++14 /EHsc /W4 /DNDEBUG /DBLAST_SCENE_HEADLESS /I"%DEMO_DIR%include" /I"%DEMO_DIR%src" /I"%BLAST_ROOT%\include" /I"%BLAST_ROOT%\include\toolkit" /I"%BLAST_ROOT%\include\globals" /I"%BLAST_ROOT%\include\lowlevel" /I"%BLAST_ROOT%\include\shared\NvFoundation" /I"%GLFW%\include" /I"%IMGUI%" /Fe:"%OUT%\OpenGLSceneTests.exe" "%DEMO_DIR%tests\OpenGLSceneTests.cpp" "%DEMO_DIR%src\OpenGLScene.cpp" "%DEMO_DIR%src\BlastSupportModel.cpp" "%DEMO_DIR%src\BlastRuntime.cpp" "%DEMO_DIR%src\SupportGraphSolver.cpp" "%DEMO_DIR%src\LoadPathSolver.cpp" "%DEMO_DIR%src\ReducedStaticsSolver.cpp" /link /LIBPATH:"%SDK%\bin" NvBlastTk.lib NvBlast.lib NvBlastGlobals.lib
+cl /nologo /std:c++14 /EHsc /W4 /DNDEBUG /I"%DEMO_DIR%include" /I"%DEMO_DIR%src" /I"%BLAST_ROOT%\include" /I"%BLAST_ROOT%\include\toolkit" /I"%BLAST_ROOT%\include\globals" /I"%BLAST_ROOT%\include\lowlevel" /I"%BLAST_ROOT%\include\shared\NvFoundation" /Fe:"%OUT%\StructuralModelTests.exe" "%DEMO_DIR%tests\StructuralModelTests.cpp" "%DEMO_DIR%src\BlastSupportModel.cpp" "%DEMO_DIR%src\BlastRuntime.cpp" "%DEMO_DIR%src\SupportGraphSolver.cpp" "%DEMO_DIR%src\LoadPathSolver.cpp" /link /LIBPATH:"%SDK%\bin" NvBlastTk.lib NvBlast.lib NvBlastGlobals.lib
 if errorlevel 1 exit /b 1
 cl /nologo /std:c++14 /EHsc /W4 /DNDEBUG /I"%DEMO_DIR%include" /I"%DEMO_DIR%src" /Fe:"%OUT%\ReducedStaticsTests.exe" "%DEMO_DIR%tests\ReducedStaticsTests.cpp" "%DEMO_DIR%src\ReducedStaticsSolver.cpp"
 if errorlevel 1 exit /b 1
@@ -19,8 +42,6 @@ cl /nologo /std:c++14 /EHsc /W4 /DNDEBUG /I"%DEMO_DIR%include" /I"%DEMO_DIR%src"
 if errorlevel 1 exit /b 1
 copy /y "%SDK%\bin\*.dll" "%OUT%" >nul
 "%OUT%\StructuralModelTests.exe"
-if errorlevel 1 exit /b 1
-"%OUT%\OpenGLSceneTests.exe"
 if errorlevel 1 exit /b 1
 "%OUT%\ReducedStaticsTests.exe"
 if errorlevel 1 exit /b 1
