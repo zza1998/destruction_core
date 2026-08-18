@@ -12,20 +12,21 @@
 namespace blast_demo
 {
 class SupportGraphSolver;
-class LoadPathSolver;
+class StaticGravitySolver;
+struct StaticGravityResult;
 
 struct StructuralConfig
 {
     float lowerColumnCapacity = 800.0f;
     float upperColumnCapacity = 290.0f;
     float overloadFailureRatio = 1.0f;
-    // Horizontal shear capacity of a floor plate, in load units (mass). A plate
-    // fails when the vertical load released by dead columns above it must be
-    // transferred sideways through the plate (shear) and exceeds this limit.
-    // Sized larger than a single support's released share so one destroyed
-    // support does NOT shear the plate; two or more simultaneous failures
-    // accumulate and snap it.
+    // Horizontal shear capacity of a floor plate, in load units (mass). Retained
+    // for public API/preset compatibility; the static-gravity solver no longer
+    // drives structural failure from lateral shear.
     float plateShearCapacity = 300.0f;
+    // Maximum number of failure waves allowed per tickAnalysis before the
+    // unresolved supported component is forcibly released. Clamped to at least 1.
+    unsigned int maxCascadeWaves = 64;
 };
 
 enum class StructuralPreset
@@ -104,12 +105,10 @@ private:
 
     void rebuildEdges();
     float gridCapacityFor(int floor) const;
-    // Lateral-shear detector: finds plates that must relay a dead support's
-    // released load sideways to same-storey neighbours (area-weighted). Only
-    // plates accumulate and can shear-fail. Accumulates per-node lateral into
-    // NodeState::lateralShear (diagnostic) and writes the pass-local output
-    // vectors (overloaded ids + lateral force in load units).
-    void detectLateralShear(std::vector<int>& overloaded, std::vector<float>& lateralValues);
+    // Applies one StaticGravityResult to model state: copies supported/load and
+    // diagnostic fields onto live nodes, then schedules/executes reported
+    // failures (unsupported immediate, overloaded as a delayed wave).
+    void applyStaticGravityResult(const StaticGravityResult& result);
     void markDirty(int nodeId);
     void markIncidentNeighborsDirty(int nodeId);
     void addEvent(const std::string& text);
@@ -117,7 +116,8 @@ private:
     void scheduleFail(int nodeId, NodeStatus status, const std::string& reason = "",
                       float snapN = 0.0f, float snapV = 0.0f, float snapM = 0.0f);
     void executePendingFail(int nodeId, NodeStatus status, const std::string& reason = "",
-                            float snapN = 0.0f, float snapV = 0.0f, float snapM = 0.0f);
+                            float snapN = 0.0f, float snapV = 0.0f, float snapM = 0.0f,
+                            bool spawnFragments = true);
 
     struct PendingFail
     {
@@ -131,6 +131,7 @@ private:
         float snapN = 0.0f;
         float snapV = 0.0f;
         float snapM = 0.0f;
+        bool spawnFragments = true;
     };
 
     std::vector<NodeState> m_nodes;
@@ -139,7 +140,7 @@ private:
     std::vector<FragmentSpawnInfo> m_pendingFragments;
     std::unique_ptr<BlastRuntime> m_blastRuntime;
     std::unique_ptr<SupportGraphSolver> m_graphSolver;
-    std::unique_ptr<LoadPathSolver> m_loadPathSolver;
+    std::unique_ptr<StaticGravitySolver> m_staticGravitySolver;
     uint32_t m_seed = 0;
     bool m_progressiveCollapse = false;
     bool m_hasDamage = false;

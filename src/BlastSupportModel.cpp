@@ -1,8 +1,8 @@
 #include "BlastSupportModel.h"
 #include "BlastRuntime.h"
 #include "ContactEdges.h"
-#include "LoadPathSolver.h"
 #include "SceneLayout.h"
+#include "StaticGravitySolver.h"
 #include "SupportGraphSolver.h"
 
 #include <algorithm>
@@ -31,7 +31,7 @@ BlastSupportModel::BlastSupportModel(const StructuralConfig& config)
     : m_config(config)
     , m_blastRuntime(new BlastRuntime())
     , m_graphSolver(new SupportGraphSolver())
-    , m_loadPathSolver(new LoadPathSolver())
+    , m_staticGravitySolver(new StaticGravitySolver())
 {
     reset();
 }
@@ -189,7 +189,7 @@ void BlastSupportModel::reset()
     std::string blastError;
     if (!m_blastRuntime->initialize(m_nodes, m_edges, m_activeFloors, m_activeColumns, m_activeBlocks, m_activeWalls, blastError))
         addEvent(blastError);
-    m_loadPathSolver->route(m_nodes, m_edges, m_activeFloors, m_activeColumns, m_activeBlocks, m_activeWalls);
+    applyStaticGravityResult(m_staticGravitySolver->solve(m_nodes, m_edges));
     if (isGrid())
         addEvent("Reset: " + std::to_string(m_activeFloors) + " floors, " +
                  std::to_string(m_activeBlocks) + " blocks + " +
@@ -219,26 +219,17 @@ bool BlastSupportModel::damageNode(int nodeId, float amount)
     addEvent(node.name + " damage -> " + std::to_string(static_cast<int>(node.health)) + " HP");
     if (node.health == 0.0f)
     {
-        // The dead member's own weight is what a block above must now relay
-        // sideways (its lateral duty); this is NOT added to the storey vertical
-        // total (LoadPathSolver drops dead members), so use its own mass, not a
-        // pre-failure load share.
         node.releasedLoad = node.mass;
         node.alive = false;
         addEvent(node.name + " failed; load path removed.");
         std::vector<FragmentSpawnInfo> fragments;
         m_blastRuntime->fractureMember(node, m_edges, m_activeFloors, m_activeColumns, m_activeBlocks, m_activeWalls, fragments);
         m_pendingFragments.insert(m_pendingFragments.end(), fragments.begin(), fragments.end());
+        // A dead node is not a valid relay in the static-gravity model: cut every
+        // incident edge. Live neighbors keep their own edges and may reroute.
         for (EdgeState& edge : m_edges)
-        {
-            const bool incident = edge.from == nodeId || edge.to == nodeId;
-            const bool horizontal = edge.from > 0 && edge.to > 0 &&
-                horizontalContact(m_nodes[edge.from].box, m_nodes[edge.to].box, kContactTol);
-            // A destroyed block must keep its horizontal bonds alive so its
-            // released load can route to neighboring blocks. Vertical support
-            // edges are removed because the block can no longer carry load.
-            if (incident && !horizontal) edge.alive = false;
-        }
+            if (edge.from == nodeId || edge.to == nodeId)
+                edge.alive = false;
     }
     if (node.health == 0.0f)
         markIncidentNeighborsDirty(nodeId);
@@ -353,170 +344,6 @@ void BlastSupportModel::setPlateShearCapacity(float loadUnits)
     }
 }
 
-// Correct lateral-shear model (continuous-beam / diaphragm): destroying a support
-// makes its released load travel sideways along the plate band toward the nearest
-// SURVIVING bearing. A floor band acts like a simply-supported continuous member,
-// so its shear force is largest near the surviving support and smallest at the
-// dead / free end — the surviving column's plate must carry the accumulated load
-// of every unsupported plate between it and the failure. We walk each source
-// plate toward the nearest surviving bearing, accumulating a "transported" load
-// that grows as we approach the support; each plate on that path is credited the
-// load it must pass sideways, so the plate next to the surviving column sees the
-// peak shear and the dead column's plate sees the least.
-void BlastSupportModel::detectLateralShear(std::vector<int>& overloaded,
-                                           std::vector<float>& lateralValues)
-{
-    overloaded.clear();
-    lateralValues.clear();
-    std::vector<float> lateral(m_nodes.size(), 0.0f);
-    const int n = static_cast<int>(m_nodes.size());
-
-    auto isAliveBearing = [&](int id) {
-        return id > 0 && id < n && m_nodes[id].alive &&
-               deriveRole(m_nodes[id].box) == MemberRole::VerticalBearing;
-    };
-    auto isPlate = [&](int id) {
-        return id > 0 && id < n && m_nodes[id].alive &&
-               deriveRole(m_nodes[id].box) == MemberRole::HorizontalPlate;
-    };
-    auto sameStorey = [&](const NodeState& a, const NodeState& b) {
-        return std::fabs(a.box.cy - b.box.cy) <= 1e-3f;
-    };
-
-    // Source: for each alive plate, the released load of the dead supports directly
-    // beneath it (its own weight no longer has a vertical path) plus its own mass,
-    // which it must push sideways.
-    std::vector<float> sourceLoad(m_nodes.size(), 0.0f);
-    std::vector<int> sourcePlate;
-    for (const NodeState& node : m_nodes)
-    {
-        if (!isPlate(node.id)) continue;
-        float duty = 0.0f;
-        for (const EdgeState& edge : m_edges)
-        {
-            if (edge.from != node.id) continue;
-            if (edge.to <= 0 || edge.to >= n) continue;
-            const NodeState& support = m_nodes[edge.to];
-            if (support.alive) continue;
-            if (std::fabs(node.box.minY() - support.box.maxY()) > kContactTol) continue;
-            duty += support.releasedLoad;
-        }
-        if (duty > 0.0f)
-        {
-            sourceLoad[node.id] = duty;
-            sourcePlate.push_back(node.id);
-        }
-    }
-    if (sourcePlate.empty()) goto done;
-
-    // For each source plate, walk toward the nearest surviving bearing along the
-    // horizontal plate path, accumulating the transported load. We try both the X
-    // and Z axes; each is a candidate "run" direction. The load splits evenly
-    // among the directions that lead to a surviving bearing.
-    for (int sid : sourcePlate)
-    {
-        const NodeState& S = m_nodes[sid];
-        const float load = sourceLoad[sid];
-        if (load <= 0.0f) continue;
-
-        // Neighbours of S that are same-storey plates (horizontal contact).
-        auto plateNeighbours = [&](int id) {
-            std::vector<int> out;
-            const NodeState& a = m_nodes[id];
-            for (int j = 1; j < n; ++j)
-            {
-                if (!isPlate(j) || j == id) continue;
-                if (!sameStorey(a, m_nodes[j])) continue;
-                if (!horizontalContact(a.box, m_nodes[j].box, kContactTol)) continue;
-                out.push_back(j);
-            }
-            return out;
-        };
-
-        // Distance from a plate to the nearest surviving bearing on its floor
-        // (match by floor index, not cy — plates and the columns that support
-        // them sit at different heights in the same storey).
-        auto nearestSupportDistSq = [&](int id) -> float {
-            const NodeState& a = m_nodes[id];
-            float best = -1.0f;
-            for (int j = 1; j < n; ++j)
-            {
-                if (!isAliveBearing(j) || m_nodes[j].floor != a.floor) continue;
-                const float dx = a.box.cx - m_nodes[j].box.cx;
-                const float dz = a.box.cz - m_nodes[j].box.cz;
-                const float d2 = dx * dx + dz * dz;
-                if (best < 0.0f || d2 < best) best = d2;
-            }
-            return best;
-        };
-
-        // Dedicated BFS toward the nearest surviving bearing: accumulate load on
-        // the path from S outward, adding to each plate then growing transported.
-        // We perform a flood where the accumulated load is carried to the support.
-        // Treat the whole connected component as a set of plates; walk from S and
-        // keep crediting accumulated load outward, weighting by how close to the
-        // surviving support each plate is (closer => passes more).
-        // Load splits evenly across the number of distinct nearest-bearing directions.
-        std::vector<int> comp;
-        std::vector<int> stack{sid};
-        std::vector<char> seen(n, 0); seen[sid] = 1;
-        while (!stack.empty()) { int c = stack.back(); stack.pop_back(); comp.push_back(c);
-            for (int nb : plateNeighbours(c)) if (!seen[nb]) { seen[nb] = 1; stack.push_back(nb); } }
-        if (comp.empty()) continue;
-
-        // Distances of component plates to nearest support; the plate at the peak
-        // (nearest to the surviving support) takes the largest share, dead-end the
-        // smallest. Use inverse-distance weighting from the surviving support so the
-        // nearest plate to the support bears the most.
-        std::vector<float> d2(comp.size());
-        float maxD2 = 0.0f;
-        bool anySupport = false;
-        for (size_t i = 0; i < comp.size(); ++i)
-        {
-            d2[i] = nearestSupportDistSq(comp[i]);
-            if (d2[i] >= 0.0f) { anySupport = true; if (d2[i] > maxD2) maxD2 = d2[i]; }
-        }
-        if (!anySupport) continue;
-        // Weight: closer to support (smaller d2) => larger shear pass-through.
-        float wsum = 0.0f;
-        for (size_t i = 0; i < comp.size(); ++i)
-        {
-            if (d2[i] >= 0.0f) wsum += (maxD2 + 1.0f) - d2[i];
-        }
-        if (wsum <= 0.0f) continue;
-        for (size_t i = 0; i < comp.size(); ++i)
-            if (d2[i] >= 0.0f)
-                lateral[comp[i]] += load * ((maxD2 + 1.0f) - d2[i]) / wsum;
-        // The plates with a surviving bearing directly beneath (d2==0) are not
-        // shear-active themselves; they just pass through — but for display we keep
-        // their credited share, which the user can read.
-
-        // ALSO credit the direct source plate fully so the shown per-plate shear is
-        // never zero at the failure point (it still must relay its own load) — but
-        // keep the support-adjacent plates dominant. (Already covered by weights.)
-    }
-
-done:
-    // Stash the accumulated lateral on each node so the inspector / 3D view and
-    // tests can read it directly.
-    for (int i = 0; i < n; ++i)
-        m_nodes[i].lateralShear = lateral[i];
-
-    // Pass 2: only alive plates shear-fail when their lateral share exceeds
-    // their shear capacity. Values are in load units to match shearCapacity.
-    for (const NodeState& node : m_nodes)
-    {
-        if (node.id == 0 || !node.alive ||
-            deriveRole(node.box) != MemberRole::HorizontalPlate) continue;
-        if (lateral[node.id] > node.shearCapacity)
-        {
-            overloaded.push_back(node.id);
-            lateralValues.push_back(lateral[node.id]);
-        }
-    }
-}
-
-
 void BlastSupportModel::damageColumn(int floor, int slot, float amount)
 {
     if (floor < 0 || floor >= m_activeFloors || slot < 0 || slot >= m_activeColumns)
@@ -573,14 +400,12 @@ void BlastSupportModel::scheduleFail(int nodeId, NodeStatus status, const std::s
         if (pending.nodeId == nodeId) return;
     PendingFail pending;
     pending.nodeId = nodeId;
-    // Stagger within a wave so failures do not all fire on the same frame:
-    // each newly scheduled member is offset a little later than the previous
-    // one, producing a short burst of sequential collapses instead of one
-    // instant pop. When the delay is 0 the effect must stay immediate.
-    pending.dueTime = m_currentTime + m_cascadeDelay + (m_cascadeDelay > 0.0f ? m_pendingStagger : 0.0f);
-    m_pendingStagger += m_cascadeDelay > 0.0f ? 0.05f : 0.0f;
+    // All overloads reported by one solver result share one failure wave: the
+    // same due time, no intra-wave stagger. delay<=0 keeps the effect immediate.
+    pending.dueTime = m_currentTime + m_cascadeDelay;
     pending.status = status;
     pending.reason = reason;
+    pending.spawnFragments = true;
     if (status == NodeStatus::Overloaded)
     {
         if (snapN != 0.0f || snapV != 0.0f || snapM != 0.0f)
@@ -599,7 +424,7 @@ void BlastSupportModel::scheduleFail(int nodeId, NodeStatus status, const std::s
 }
 
 void BlastSupportModel::executePendingFail(int nodeId, NodeStatus status, const std::string& reason,
-                                           float snapN, float snapV, float snapM)
+                                           float snapN, float snapV, float snapM, bool spawnFragments)
 {
     NodeState& node = m_nodes[nodeId];
     node.releasedLoad = node.mass;
@@ -622,14 +447,10 @@ void BlastSupportModel::executePendingFail(int nodeId, NodeStatus status, const 
             const float cap = node.capacity * 9.81f;
             std::snprintf(buf, sizeof(buf), "  N=%.2f/%.2f N", snapN, cap);
         }
-        else if (reason == "shear")
+        else if (reason == "bending")
         {
-            // The failure criterion uses node.shearCapacity (which is the
-            // StructuralConfig::plateShearCapacity for a plate), so the log must
-            // compare against that same threshold. snapV is in Newtons (convert
-            // to load units on input), so convert the threshold to Newtons too,
-            // matching the axial log below.
-            std::snprintf(buf, sizeof(buf), "  V=%.2f/%.2f N", snapV, node.shearCapacity * 9.81f);
+            const float momentLimit = node.capacity * 9.81f * node.maxOverhang;
+            std::snprintf(buf, sizeof(buf), "  M=%.2f/%.2f N*m", snapM, momentLimit);
         }
         else
         {
@@ -639,22 +460,66 @@ void BlastSupportModel::executePendingFail(int nodeId, NodeStatus status, const 
     }
     addEvent(node.name + " [" + nodeTypeName(node) + "] failed (" + detail +
              "); load path removed." + values);
-    std::vector<FragmentSpawnInfo> fragments;
-    m_blastRuntime->fractureMember(node, m_edges, m_activeFloors, m_activeColumns, m_activeBlocks, m_activeWalls, fragments);
-    m_pendingFragments.insert(m_pendingFragments.end(), fragments.begin(), fragments.end());
-    for (EdgeState& edge : m_edges)
+    if (spawnFragments)
     {
-        const bool incident = edge.from == nodeId || edge.to == nodeId;
-        if (!incident) continue;
-        const bool horizontal = edge.from > 0 && edge.to > 0 &&
-            horizontalContact(m_nodes[edge.from].box, m_nodes[edge.to].box, kContactTol);
-        // On any death path, only the vertical incident edges are cut: a
-        // ruined plate must keep its horizontal bonds so its released load can
-        // still detour sideways to neighbours (matches damageNode and the
-        // documented "destroyed block keeps horizontal bonds" intent).
-        if (!horizontal) edge.alive = false;
+        std::vector<FragmentSpawnInfo> fragments;
+        m_blastRuntime->fractureMember(node, m_edges, m_activeFloors, m_activeColumns, m_activeBlocks, m_activeWalls, fragments);
+        m_pendingFragments.insert(m_pendingFragments.end(), fragments.begin(), fragments.end());
     }
+    // A dead node is not a valid relay in the static-gravity model: cut every
+    // incident edge. Live neighbors keep their own edges and may reroute.
+    for (EdgeState& edge : m_edges)
+        if (edge.from == nodeId || edge.to == nodeId)
+            edge.alive = false;
     markIncidentNeighborsDirty(nodeId);
+}
+
+void BlastSupportModel::applyStaticGravityResult(const StaticGravityResult& result)
+{
+    // Copy diagnostics and the confirmed supported state onto live nodes, then
+    // fail unsupported nodes immediately and schedule overloads as one wave.
+    for (int i = 0; i < static_cast<int>(m_nodes.size()); ++i)
+    {
+        NodeState& node = m_nodes[static_cast<size_t>(i)];
+        node.lateralShear = 0.0f;
+        if (i == 0 || !node.alive) continue;
+        const StaticGravityNodeResult& r = result.nodes[static_cast<size_t>(i)];
+        node.supported = r.supported;
+        node.load = r.supported ? r.carriedMass : 0.0f;
+        node.carriedMass = r.carriedMass;
+        node.carriedComX = r.carriedComX;
+        node.carriedComZ = r.carriedComZ;
+        node.compressionUtilization = r.compressionUtilization;
+        node.bendingUtilization = r.bendingUtilization;
+        node.utilization = r.utilization;
+    }
+    for (int id : result.unsupportedNodes)
+    {
+        if (id <= 0 || id >= static_cast<int>(m_nodes.size()) || !m_nodes[static_cast<size_t>(id)].alive)
+            continue;
+        executePendingFail(id, NodeStatus::Unsupported, "", 0.0f, 0.0f, 0.0f, false);
+    }
+    for (int id : result.overloadedNodes)
+    {
+        if (id <= 0 || id >= static_cast<int>(m_nodes.size()) || !m_nodes[static_cast<size_t>(id)].alive)
+            continue;
+        const NodeState& node = m_nodes[static_cast<size_t>(id)];
+        const bool bendingDominant = node.bendingUtilization > node.compressionUtilization;
+        const std::string reason = bendingDominant ? "bending" : "axial";
+        if (bendingDominant)
+        {
+            const float eccentricity = std::sqrt(
+                (node.carriedComX - node.box.cx) * (node.carriedComX - node.box.cx) +
+                (node.carriedComZ - node.box.cz) * (node.carriedComZ - node.box.cz));
+            const float moment = node.carriedMass * 9.81f * eccentricity;
+            scheduleFail(id, NodeStatus::Overloaded, reason, 0.0f, 0.0f, moment);
+        }
+        else
+        {
+            const float normalForce = node.carriedMass * 9.81f;
+            scheduleFail(id, NodeStatus::Overloaded, reason, normalForce, 0.0f, 0.0f);
+        }
+    }
 }
 
 void BlastSupportModel::update(float time)
@@ -672,7 +537,8 @@ void BlastSupportModel::update(float time)
                 if (m_nodes[it->nodeId].alive)
                 {
                     executePendingFail(it->nodeId, it->status, it->reason,
-                                       it->snapN, it->snapV, it->snapM);
+                                       it->snapN, it->snapV, it->snapM,
+                                       it->spawnFragments);
                     executed = true;
                 }
                 it = m_pending.erase(it);
@@ -680,106 +546,51 @@ void BlastSupportModel::update(float time)
             else ++it;
         }
         if (!executed) break;
-        // A new wave of failures starts fresh: the intra-wave stagger must not
-        // accumulate across waves, otherwise the delay drifts (e.g. many waves
-        // push the due time far into the future).
-        m_pendingStagger = 0.0f;
         tickAnalysis();
     }
 }
 
 void BlastSupportModel::tickAnalysis()
 {
-    ++m_analysisTick; const size_t initialDirty = m_dirtyNodes.size();
-    if (initialDirty == 0) return;
-    int guard = 0;
-    while (!m_dirtyNodes.empty() && guard++ < 64)
+    ++m_analysisTick;
+    if (m_dirtyNodes.empty()) return;
+    // Clear the dirty queue up-front: the static solver re-analyzes the whole
+    // live graph, and any immediate unsupported release re-marks neighbors.
+    m_dirtyNodes.clear();
+    std::fill(m_dirtyFlags.begin(), m_dirtyFlags.end(), false);
+
+    const unsigned int maxWaves = m_config.maxCascadeWaves < 1u ? 1u : m_config.maxCascadeWaves;
+    unsigned int wave = 0;
+    for (; wave < maxWaves; ++wave)
     {
-        for (EdgeState& edge : m_edges) edge.load = 0.0f;
-        size_t bfsCount = 0;
-        std::vector<int> affected = m_graphSolver->collectAffectedNodes(
-            m_nodes, m_edges, m_dirtyNodes, m_dirtyFlags, std::numeric_limits<size_t>::max(), bfsCount);
-        for (int id : affected)
-        {
-            NodeState& node = m_nodes[id];
-            if (node.id != 0 && node.alive &&
-                !m_graphSolver->hasGroundPath(id, m_nodes, m_edges))
-            {
-                node.releasedLoad = node.mass;
-                scheduleFail(id, NodeStatus::Unsupported);
-            }
-        }
-        std::vector<int> overloaded;
-        // Per-floor uniform load distribution (scheme 1): each storey gathers
-        // the weight of the storeys above plus its own masses and divides it
-        // equally among its surviving vertical bearings. A bearing fails when
-        // its share exceeds its capacity. This is the driver of failure.
-        overloaded = m_loadPathSolver->route(
-            m_nodes, m_edges, m_activeFloors, m_activeColumns, m_activeBlocks,
-            m_activeWalls, false);
-        // Lateral (horizontal) shear detection, correct physics: when a
-        // support directly beneath a plate dies, the plate must relay that
-        // support's released load sideways to its same-storey neighbours (via
-        // horizontalContact edges), area-weighted like the storey redistribution
-        // above. The relaying plate and each neighbour accumulate a lateral
-        // force; only a plate shear-fails, when its share exceeds its shear
-        // capacity. This replaces the old anti-physical loop that made the
-        // member *above* a dead support the shear victim and never actually
-        // transferred the load sideways (see detectLateralShear).
-        std::vector<int> shearOverloaded;
-        std::vector<float> shearValues;
-        detectLateralShear(shearOverloaded, shearValues);
-        // The whole-storey redistribution couples every member, so a heavy
-        // overload near the top also raises the load of the intact storeys
-        // below. If we scheduled all of them at once the whole building would
-        // pop on the first frame. Collapse from the top down: when several
-        // storeys are overloaded only the highest is scheduled this pass; once
-        // it fails the solver re-runs and the storeys below it recover. A
-        // single overloaded storey (e.g. the surviving ground column after its
-        // neighbours are destroyed) is always scheduled.
-        std::vector<int> toSchedule = overloaded;
-        if (!overloaded.empty())
-        {
-            int minFloor = std::numeric_limits<int>::max();
-            int maxFloor = -1;
-            for (int id : overloaded)
-                if (id >= 0 && id < static_cast<int>(m_nodes.size()))
-                {
-                    minFloor = std::min(minFloor, m_nodes[id].floor);
-                    maxFloor = std::max(maxFloor, m_nodes[id].floor);
-                }
-            if (minFloor != maxFloor)
-            {
-                toSchedule.clear();
-                for (int id : overloaded)
-                    if (id >= 0 && id < static_cast<int>(m_nodes.size()) &&
-                        m_nodes[id].floor == maxFloor)
-                        toSchedule.push_back(id);
-            }
-        }
-        for (int id : toSchedule)
-        {
-            if (id < 0 || id >= static_cast<int>(m_nodes.size())) continue;
-            scheduleFail(id, NodeStatus::Overloaded);
-        }
-        // Shear failures are scheduled on their own floor; a plate never
-        // overloads a storey below it, so no top-down filter is needed.
-        for (size_t i = 0; i < shearOverloaded.size(); ++i)
-            scheduleFail(shearOverloaded[i], NodeStatus::Overloaded, "shear",
-                         0.0f, shearValues[i] * 9.81f, 0.0f);
-        for (EdgeState& edge : m_edges)
-        {
-            const bool horizontal = edge.from > 0 && edge.to > 0 &&
-                horizontalContact(m_nodes[edge.from].box, m_nodes[edge.to].box, kContactTol);
-            if (horizontal)
-                edge.alive = edge.alive && m_nodes[edge.to].alive;
-            else
-                edge.alive = edge.alive && m_nodes[edge.from].alive && m_nodes[edge.to].alive;
-        }
+        const StaticGravityResult result = m_staticGravitySolver->solve(m_nodes, m_edges);
+        applyStaticGravityResult(result);
+        if (result.unsupportedNodes.empty())
+            break;
     }
-    addEvent("Tick " + std::to_string(m_analysisTick) + ": passes=" + std::to_string(guard) +
+
+    if (wave == maxWaves)
+    {
+        // Safety fallback: no stable solution within the wave budget. Release any
+        // still-live node that currently has no Ground path and report it.
+        StaticGravityResult result = m_staticGravitySolver->solve(m_nodes, m_edges);
+        for (int id : result.unsupportedNodes)
+        {
+            if (id <= 0 || id >= static_cast<int>(m_nodes.size()) || !m_nodes[static_cast<size_t>(id)].alive)
+                continue;
+            executePendingFail(id, NodeStatus::Unsupported, "", 0.0f, 0.0f, 0.0f, false);
+        }
+        addEvent("Cascade guard reached; released unresolved components.");
+    }
+
+    addEvent("Tick " + std::to_string(m_analysisTick) + ": waves=" + std::to_string(wave) +
              " remaining=" + std::to_string(m_dirtyNodes.size()) +
              " pending=" + std::to_string(m_pending.size()));
+
+    // A full live-graph re-analysis has run; any dirt re-marked during the
+    // release cascade has already been consumed by the re-solve loop above.
+    m_dirtyNodes.clear();
+    std::fill(m_dirtyFlags.begin(), m_dirtyFlags.end(), false);
 }
 
 void BlastSupportModel::addEvent(const std::string& text)
