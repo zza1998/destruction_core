@@ -43,7 +43,7 @@ cl /nologo /std:c++14 /EHsc /W4 /DNDEBUG /I"%DEMO_DIR%include" /I"%DEMO_DIR%src"
 if errorlevel 1 exit /b 1
 cl /nologo /std:c++14 /EHsc /W4 /DNDEBUG /I"%DEMO_DIR%include" /I"%DEMO_DIR%src" /Fe:"%OUT%\choltest2.exe" "%DEMO_DIR%tests\choltest2.cpp" "%DEMO_DIR%src\SparseCholeskySolver.cpp"
 if errorlevel 1 exit /b 1
-cl /nologo /std:c++14 /EHsc /W4 /DNDEBUG /I"%DEMO_DIR%include" /I"%DEMO_DIR%src" /Fe:"%OUT%\StaticGravitySolverTests.exe" "%DEMO_DIR%tests\StaticGravitySolverTests.cpp" "%DEMO_DIR%src\StaticGravitySolver.cpp"
+cl /nologo /std:c++14 /EHsc /W4 /DNDEBUG /I"%DEMO_DIR%include" /I"%DEMO_DIR%src" /I"%BLAST_ROOT%\include" /I"%BLAST_ROOT%\include\toolkit" /I"%BLAST_ROOT%\include\globals" /I"%BLAST_ROOT%\include\lowlevel" /I"%BLAST_ROOT%\include\shared\NvFoundation" /Fe:"%OUT%\StaticGravitySolverTests.exe" "%DEMO_DIR%tests\StaticGravitySolverTests.cpp" "%DEMO_DIR%src\StaticGravitySolver.cpp"
 if errorlevel 1 exit /b 1
 cl /nologo /std:c++14 /EHsc /W4 /DNDEBUG /DBLAST_3D /I"%DEMO_DIR%include" /I"%DEMO_DIR%src" /I"%BLAST_ROOT%\include" /I"%BLAST_ROOT%\include\toolkit" /I"%BLAST_ROOT%\include\globals" /I"%BLAST_ROOT%\include\lowlevel" /I"%BLAST_ROOT%\include\shared\NvFoundation" /I"%PX_INC%" /Fe:"%OUT%\PhysicsSmokeTests.exe" "%DEMO_DIR%tests\PhysicsSmokeTests.cpp" "%DEMO_DIR%src\BlastSupportModel.cpp" "%DEMO_DIR%src\BlastRuntime.cpp" "%DEMO_DIR%src\SupportGraphSolver.cpp" "%DEMO_DIR%src\StaticGravitySolver.cpp" "%DEMO_DIR%src\PhysicsWorld.cpp" /link /LIBPATH:"%SDK%\bin" /LIBPATH:"%PX_LIB%" NvBlastTk.lib NvBlast.lib NvBlastGlobals.lib PhysX_64.lib PhysXFoundation_64.lib PhysXCommon_64.lib PhysXCooking_64.lib PhysXExtensions_static_64.lib PhysXPvdSDK_static_64.lib PhysXTask_static_64.lib
 if errorlevel 1 exit /b 1

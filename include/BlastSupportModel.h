@@ -19,6 +19,11 @@ struct StructuralConfig
 {
     float lowerColumnCapacity = 800.0f;
     float upperColumnCapacity = 290.0f;
+    // Upper-floor columns are sized as a multiple of their nominal vertical load,
+    // so a lower storey has a larger absolute margin than an upper one and
+    // survives a partial load redistribution (e.g. two destroyed columns) instead
+    // of collapsing floor-by-floor from the top.
+    float upperColumnSafetyFactor = 2.5f;
     float overloadFailureRatio = 1.0f;
     // Horizontal shear capacity of a floor plate, in load units (mass). Retained
     // for public API/preset compatibility; the static-gravity solver no longer
@@ -105,6 +110,11 @@ private:
 
     void rebuildEdges();
     float gridCapacityFor(int floor) const;
+    // Per-storey vertical bearing capacity for the linear (non-grid, 5x4)
+    // preset: the ground storey keeps lowerColumnCapacity, and every storey
+    // above it is a multiple (upperColumnSafetyFactor) of its nominal vertical
+    // load so lower storeys carry a larger absolute margin.
+    float columnCapacityFor(int floor) const;
     // Applies one StaticGravityResult to model state: copies supported/load and
     // diagnostic fields onto live nodes, then schedules/executes reported
     // failures (unsupported immediate, overloaded as a delayed wave).

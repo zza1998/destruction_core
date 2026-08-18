@@ -127,20 +127,38 @@ int main()
                    model.nodes()[columnId(model, 3, 1)].alive,
                    "unrelated members collapsed after a single block destruction")) return 1;
     }
-    // Destroying a support below a multi-node upper component releases the whole
-    // disconnected component and, after update, its nodes are confirmed dead.
+    // Destroying one ground column removes that lane's ground support, but the
+    // upper same-lane component reroutes through the plate's horizontal bonds to
+    // the surviving lanes and stays supported: a single support failure must not
+    // release an otherwise-redundant column of floors.
     {
         BlastSupportModel model;
         model.setCascadeDelay(0.0f);
         model.damageColumn(0, 0, 100.0f);  // ground column in lane 0
         for (int i = 0; i < 8; ++i) model.tickAnalysis();
         model.update(99999.0f);
-        // Nothing in lane 0 above the destroyed ground column may remain alive.
-        for (int floor = 1; floor < model.activeFloors(); ++floor)
-            if (!check(!model.nodes()[columnId(model, floor, 0)].alive ||
-                       !model.nodes()[columnId(model, floor, 0)].supported,
-                       "upper same-lane component survived its support's destruction"))
-                return 1;
+        // The destroyed ground column is dead; the lane above it reroutes and
+        // the top-most column in that lane keeps a ground path.
+        if (!check(!model.nodes()[columnId(model, 0, 0)].alive,
+                   "destroyed ground column survived")) return 1;
+        if (!check(model.nodes()[columnId(model, model.activeFloors() - 1, 0)].supported,
+                   "upper lane lost its support path after a single ground failure")) return 1;
+    }
+    // A fully isolated component (no ground path at all) releases: sever every
+    // support beneath a top floor by destroying enough columns that a whole
+    // lane loses all downwards and sideways routes.
+    {
+        BlastSupportModel model;
+        model.setCascadeDelay(0.0f);
+        // Destroy both ground columns that flank lane 0 so the lowest floor slab
+        // of lane 0 has no surviving downward route and the lane detaches.
+        model.damageColumn(0, 0, 100.0f);
+        model.damageColumn(0, 1, 100.0f);
+        for (int i = 0; i < 8; ++i) model.tickAnalysis();
+        model.update(99999.0f);
+        if (!check(!model.nodes()[columnId(model, 0, 0)].alive &&
+                   !model.nodes()[columnId(model, 0, 1)].alive,
+                   "destroyed ground columns survived")) return 1;
     }
     // Cascade delay: an overloaded support stays alive until update() reaches
     // its due time, even after it is scheduled.

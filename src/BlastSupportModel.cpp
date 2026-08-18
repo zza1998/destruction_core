@@ -121,8 +121,8 @@ void BlastSupportModel::reset()
     {
         for (int slot = 0; slot < m_activeColumns; ++slot)
         {
-            const float capacity = isGrid() ? gridCapacityFor(floor)
-                                            : (floor == 0 ? m_config.lowerColumnCapacity : m_config.upperColumnCapacity);
+const float capacity = isGrid() ? gridCapacityFor(floor)
+                                            : columnCapacityFor(floor);
             NodeState col;
             col.id = columnId(floor, slot);
             col.name = "F" + std::to_string(floor + 1) + "-C" + std::to_string(slot + 1);
@@ -318,6 +318,25 @@ float BlastSupportModel::gridCapacityFor(int floor) const
                  static_cast<float>(m_activeWalls) * memberMass;
     }
     return total * 0.10f;
+}
+
+float BlastSupportModel::columnCapacityFor(int floor) const
+{
+    // Linear (non-grid) preset: each slot is an independent vertical chain, and
+    // a column at `floor` carries every slab and column of the storeys at or
+    // above it. That nominal vertical load is 25*(stories) for the slabs plus
+    // 25*(stories-1) for the upper columns (the top storey column carries only
+    // its own slab). The ground storey column additionally carries its own
+    // 50-mass section, so it keeps the explicit lowerColumnCapacity instead.
+    if (floor == 0)
+        return m_config.lowerColumnCapacity;
+    // Each upper storey's column carries its own 25-mass section, the 25-mass
+    // slab directly above it, and (for storeys above it) one more slab and
+    // column pair, so the nominal vertical load is 50 * (storeys at/below it):
+    // e.g. the top column carries 50, the next 100, then 150, 200.
+    const int stories = m_activeFloors - floor;
+    const float nominalLoad = 50.0f * static_cast<float>(stories);
+    return nominalLoad * m_config.upperColumnSafetyFactor;
 }
 
 void BlastSupportModel::setPlateShearCapacity(float loadUnits)

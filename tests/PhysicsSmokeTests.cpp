@@ -46,17 +46,19 @@ int main()
         PhysicsWorld world;
         world.init();
         world.rebuild(model);
-        // Destroy the single ground column supporting lane 0; the upper
-        // same-lane component loses its support path and is released.
-        model.damageColumn(0, 0, 100.0f);
+        // Destroy every top-storey column so the F5 floor loses every downwards
+        // route and is released as one intact component.
+        const int top = model.activeFloors() - 1;
+        for (int slot = 0; slot < model.activeColumns(); ++slot)
+            model.damageColumn(top, slot, 100.0f);
         for (int i = 0; i < 8; ++i) model.tickAnalysis();
         model.update(99999.0f);
         world.syncFromModel(model);
-        const int upCol = columnId(model, 3, 0);
-        if (!check(!model.nodes()[upCol].alive, "upper component was not released")) return 1;
-        if (!check(world.isDynamic(upCol), "released component did not become dynamic")) return 1;
+        const int topBlock = blockId(model, top, 0);
+        if (!check(!model.nodes()[topBlock].alive, "upper component was not released")) return 1;
+        if (!check(world.isDynamic(topBlock), "released component did not become dynamic")) return 1;
         world.syncFromModel(model);
-        if (!check(world.isDynamic(upCol), "second sync lost dynamic state")) return 1;
+        if (!check(world.isDynamic(topBlock), "second sync lost dynamic state")) return 1;
         world.shutdown();
     }
     // A directly broken member produces fragments and removes its original body;
