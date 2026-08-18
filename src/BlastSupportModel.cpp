@@ -377,15 +377,19 @@ void BlastSupportModel::setPlateOverhangFactor(float factor)
             continue;
         node.maxOverhang = std::max(node.box.hx, node.box.hz) * m_config.plateOverhangFactor;
     }
+    // Re-run the static solve so overloads are recomputed with the new
+    // tolerance and no member keeps a stale pending failure from the old one.
+    m_pending.clear();
+    applyStaticGravityResult(m_staticGravitySolver->solve(m_nodes, m_edges));
 }
 
 void BlastSupportModel::setPlateOverhang(PlateOverhang level)
 {
     switch (level)
     {
-    case PlateOverhang::Small:  setPlateOverhangFactor(0.5f); break;
-    case PlateOverhang::Medium: setPlateOverhangFactor(1.0f); break;
-    case PlateOverhang::Large:  setPlateOverhangFactor(2.0f); break;
+    case PlateOverhang::Small:  setPlateOverhangFactor(1.0f); break;
+    case PlateOverhang::Medium: setPlateOverhangFactor(2.5f); break;
+    case PlateOverhang::Large:  setPlateOverhangFactor(5.0f); break;
     }
 }
 

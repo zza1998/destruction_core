@@ -188,19 +188,16 @@ StaticGravityResult StaticGravitySolver::solve(const std::vector<NodeState>& nod
         }
         else if (deriveRole(node.box) == MemberRole::HorizontalPlate && node.maxOverhang > 0.0f)
         {
-            // Cantilever (overhang) failure for a floor plate, resolved per axis
-            // from its edge-support freedom: a plate is stable on an axis when it
-            // has a live horizontal neighbour on both sides (or a direct vertical
-            // support). If its horizontal neighbours all sit on one side only, the
-            // far side is a free end and the plate overhangs by the distance from
-            // its own centre to the nearest supporting neighbour on that axis.
-            const int dist = result.distanceToGround[static_cast<std::size_t>(i)];
+            // Cantilever (overhang) failure for a floor plate. A plate overhangs
+            // only when it is the free end of a broken one-dimensional slab chain:
+            // exactly one live horizontal neighbour and no live vertical bearing
+            // directly beneath. A plate with two or more neighbours belongs to a
+            // continuous floor/beam and never overhangs this way. The overhang arm
+            // is the plate's horizontal distance to the nearest live vertical
+            // bearing, so a longer tolerance lets plates farther from the remaining
+            // support hold on (Small/Medium/Large tune how many drop).
+            std::vector<int> hNeighbours;
             bool hasVerticalSupport = false;
-            bool hasLeft = false, hasRight = false, hasFront = false, hasBack = false;
-            float nearestRight = std::numeric_limits<float>::max();
-            float nearestLeft = std::numeric_limits<float>::max();
-            float nearestFront = std::numeric_limits<float>::max();
-            float nearestBack = std::numeric_limits<float>::max();
             for (std::size_t ei = 0; ei < edges.size(); ++ei)
             {
                 const EdgeState& e = edges[ei];
@@ -210,43 +207,32 @@ StaticGravityResult StaticGravitySolver::solve(const std::vector<NodeState>& nod
                 const int other = e.from == i ? e.to : e.from;
                 if (!nodes[static_cast<std::size_t>(other)].alive) continue;
                 const BoxLayout& o = nodes[static_cast<std::size_t>(other)].box;
-                const bool horizontal = horizontalContact(node.box, o);
-                const bool vertical = verticalContact(node.box, o) ||
-                                      verticalContact(o, node.box);
-                if (vertical)
+                if (verticalContact(node.box, o) || verticalContact(o, node.box))
                 {
                     hasVerticalSupport = true;
                     continue;
                 }
-                if (!horizontal) continue;
-                const float dx = o.cx - node.box.cx;
-                const float dz = o.cz - node.box.cz;
-                if (std::fabs(dx) > std::fabs(dz))
-                {
-                    if (dx > 1e-3f) { hasRight = true; nearestRight = std::min(nearestRight, dx); }
-                    else if (dx < -1e-3f) { hasLeft = true; nearestLeft = std::min(nearestLeft, -dx); }
-                }
-                else
-                {
-                    if (dz > 1e-3f) { hasBack = true; nearestBack = std::min(nearestBack, dz); }
-                    else if (dz < -1e-3f) { hasFront = true; nearestFront = std::min(nearestFront, -dz); }
-                }
+                if (!horizontalContact(node.box, o)) continue;
+                if (std::find(hNeighbours.begin(), hNeighbours.end(), other) == hNeighbours.end())
+                    hNeighbours.push_back(other);
             }
 
-            float overhangX = 0.0f;
-            float overhangZ = 0.0f;
-            if (!hasVerticalSupport)
+            float overhang = 0.0f;
+            if (!hasVerticalSupport && hNeighbours.size() == 1u)
             {
-                if (hasRight && !hasLeft && nearestRight < std::numeric_limits<float>::max())
-                    overhangX = nearestRight;   // free on the -X side
-                else if (hasLeft && !hasRight && nearestLeft < std::numeric_limits<float>::max())
-                    overhangX = nearestLeft;    // free on the +X side
-                if (hasBack && !hasFront && nearestBack < std::numeric_limits<float>::max())
-                    overhangZ = nearestBack;    // free on the -Z side
-                else if (hasFront && !hasBack && nearestFront < std::numeric_limits<float>::max())
-                    overhangZ = nearestFront;   // free on the +Z side
+                float nearest = std::numeric_limits<float>::max();
+                for (int b = 1; b < n; ++b)
+                {
+                    const NodeState& other = nodes[static_cast<std::size_t>(b)];
+                    if (!other.alive || b == i) continue;
+                    if (deriveRole(other.box) != MemberRole::VerticalBearing) continue;
+                    const float dx = other.box.cx - node.box.cx;
+                    const float dz = other.box.cz - node.box.cz;
+                    const float d = std::sqrt(dx * dx + dz * dz);
+                    if (d < nearest) nearest = d;
+                }
+                overhang = nearest == std::numeric_limits<float>::max() ? 0.0f : nearest;
             }
-            const float overhang = std::sqrt(overhangX * overhangX + overhangZ * overhangZ);
             const float bending = overhang / node.maxOverhang;
             result.nodes[static_cast<std::size_t>(i)].bendingUtilization = bending;
             result.nodes[static_cast<std::size_t>(i)].utilization = bending;

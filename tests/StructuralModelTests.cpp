@@ -230,22 +230,42 @@ int main()
     }
     // Cantilever (overhang) failure: after destroying the left end column of a
     // ShearPair row, the now-free left plates overhang and fail, while the plate
-    // still sitting on the surviving right column holds. Increasing the tolerance
-    // to Large lets more plates survive.
+    // still sitting on the surviving right column holds. The Small/Medium/Large
+    // tolerance tunes how many plates drop.
     {
-        BlastSupportModel model;
-        model.setPreset(StructuralPreset::ShearPair);
-        model.setCascadeDelay(0.0f);
-        model.setPlateOverhang(BlastSupportModel::PlateOverhang::Medium);
-        model.damageColumn(0, 0, 100.0f);
-        for (int i = 0; i < 8; ++i) model.tickAnalysis();
-        model.update(99999.0f);
-        // The plate over the surviving right column stays alive.
-        if (!check(model.nodes()[blockId(model, 0, 3)].alive,
+        auto deadCount = [](const BlastSupportModel& m) {
+            int dead = 0;
+            for (int s = 0; s < m.activeBlocks(); ++s)
+                if (!m.nodes()[static_cast<size_t>(blockId(m, 0, s))].alive) ++dead;
+            return dead;
+        };
+        BlastSupportModel small;
+        small.setPreset(StructuralPreset::ShearPair);
+        small.setCascadeDelay(0.0f);
+        small.setPlateOverhang(BlastSupportModel::PlateOverhang::Small);
+        small.damageColumn(0, 0, 100.0f);
+        for (int i = 0; i < 8; ++i) small.tickAnalysis();
+        small.update(99999.0f);
+
+        BlastSupportModel large;
+        large.setPreset(StructuralPreset::ShearPair);
+        large.setCascadeDelay(0.0f);
+        large.setPlateOverhang(BlastSupportModel::PlateOverhang::Large);
+        large.damageColumn(0, 0, 100.0f);
+        for (int i = 0; i < 8; ++i) large.tickAnalysis();
+        large.update(99999.0f);
+
+        // The plate over the surviving right column always stays alive.
+        if (!check(small.nodes()[blockId(small, 0, 3)].alive &&
+                   large.nodes()[blockId(large, 0, 3)].alive,
                    "plated column plate did not survive end-column destruction")) return 1;
-        // At least the far-left free plate overhung and failed.
-        if (!check(!model.nodes()[blockId(model, 0, 0)].alive,
+        // The far-left free plate always overhangs and fails.
+        if (!check(!small.nodes()[blockId(small, 0, 0)].alive &&
+                   !large.nodes()[blockId(large, 0, 0)].alive,
                    "free end plate did not overhang-fail after end-column destruction")) return 1;
+        // A larger tolerance drops fewer plates than a small one.
+        if (!check(deadCount(large) < deadCount(small),
+                   "Large overhang tolerance did not preserve more plates than Small")) return 1;
     }
     std::cout << "PASS: static gravity integration, release, cascade, and preset checks\n";
     return 0;
