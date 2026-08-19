@@ -357,7 +357,7 @@ StaticGravityResult StaticGravitySolver::solve(const std::vector<NodeState>& nod
             result.nodes[static_cast<std::size_t>(i)].bendingUtilization = bending;
             result.nodes[static_cast<std::size_t>(i)].utilization = compression + bending;
 
-            if (compression + bending >= 1.0f)
+            if (compression + bending >= failureRatio)
                 result.overloadedNodes.push_back(i);
         }
         else if (deriveRole(node.box) == MemberRole::HorizontalPlate && node.maxOverhang > 0.0f)

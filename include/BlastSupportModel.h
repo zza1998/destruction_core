@@ -101,6 +101,13 @@ public:
     // Convenience presets for the designer-facing cantilever tolerance.
     enum class PlateOverhang { Small, Medium, Large };
     void setPlateOverhang(PlateOverhang level);
+    // Sets the vertical-bearing failure threshold: a column fails when its axial
+    // utilization (carried mass / capacity) reaches this fraction.
+    void setColumnFailureRatio(float ratio);
+    // Convenience presets: Small=0.7 (fails at 70% usage, fragile), Medium=0.85,
+    // Large=1.0 (fails only at full capacity, sturdy).
+    enum class ColumnStrength { Small, Medium, Large };
+    void setColumnStrength(ColumnStrength level);
 
     // Fragments spawned by destroyed members since the last call. PhysicsWorld
     // consumes this to create visual debris bodies.

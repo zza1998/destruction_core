@@ -30,5 +30,10 @@ class StaticGravitySolver
 public:
     StaticGravityResult solve(const std::vector<NodeState>& nodes,
                               const std::vector<EdgeState>& edges) const;
+
+    // Fraction of a vertical bearing's capacity at which it fails. A bearing
+    // fails when its axial utilization reaches this value (compressionUtilization
+    // >= failureRatio). 0.7 fails early (fragile), 1.0 fails at full capacity.
+    float failureRatio = 1.0f;
 };
 }

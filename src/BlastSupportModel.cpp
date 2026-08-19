@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -390,6 +391,24 @@ void BlastSupportModel::setPlateOverhang(PlateOverhang level)
     case PlateOverhang::Small:  setPlateOverhangFactor(1.0f); break;
     case PlateOverhang::Medium: setPlateOverhangFactor(2.5f); break;
     case PlateOverhang::Large:  setPlateOverhangFactor(5.0f); break;
+    }
+}
+
+void BlastSupportModel::setColumnFailureRatio(float ratio)
+{
+    m_config.overloadFailureRatio = std::max(0.01f, ratio);
+    m_staticGravitySolver->failureRatio = m_config.overloadFailureRatio;
+    m_pending.clear();
+    applyStaticGravityResult(m_staticGravitySolver->solve(m_nodes, m_edges));
+}
+
+void BlastSupportModel::setColumnStrength(ColumnStrength level)
+{
+    switch (level)
+    {
+    case ColumnStrength::Small:  setColumnFailureRatio(0.7f);  break;
+    case ColumnStrength::Medium: setColumnFailureRatio(0.85f); break;
+    case ColumnStrength::Large:  setColumnFailureRatio(1.0f);  break;
     }
 }
 

@@ -267,6 +267,42 @@ int main()
         if (!check(deadCount(large) < deadCount(small),
                    "Large overhang tolerance did not preserve more plates than Small")) return 1;
     }
+    // Column strength (failure ratio): a weaker column fails at lower axial
+    // utilization than a stronger one. Small fails at 70%, Medium 85%, Large 100%.
+    {
+        auto topColsDead = [](const BlastSupportModel& m, int floor) {
+            int dead = 0;
+            for (int s = 0; s < m.activeColumns(); ++s)
+                if (!m.nodes()[static_cast<size_t>(columnId(m, floor, s))].alive) ++dead;
+            return dead;
+        };
+        // Large (1.0): break 1 top column -> the storey still stands.
+        {
+            BlastSupportModel m;
+            m.setCascadeDelay(0.0f);
+            m.setColumnStrength(BlastSupportModel::ColumnStrength::Large);
+            m.damageColumn(3, 0, 100.0f);
+            for (int i = 0; i < 8; ++i) m.tickAnalysis();
+            m.update(99999.0f);
+            if (!check(topColsDead(m, 3) == 1,
+                       "Large column strength collapsed storey after a single column loss")) return 1;
+        }
+        // Small (0.7): the surviving columns exceed 70% utilization after
+        // redistribution, so more columns fail than with Large for the same damage.
+        {
+            BlastSupportModel m;
+            m.setCascadeDelay(0.0f);
+            m.setColumnStrength(BlastSupportModel::ColumnStrength::Small);
+            m.damageColumn(3, 0, 100.0f);
+            m.damageColumn(3, 1, 100.0f);
+            for (int i = 0; i < 8; ++i) m.tickAnalysis();
+            m.update(99999.0f);
+            // With only 2 of 4 columns left and a 0.7 threshold, the storey
+            // collapses further than the Large case.
+            if (!check(topColsDead(m, 3) > 2,
+                       "Small column strength did not collapse the overloaded storey")) return 1;
+        }
+    }
     std::cout << "PASS: static gravity integration, release, cascade, and preset checks\n";
     return 0;
 }

@@ -156,6 +156,14 @@ static int runDemo(bool smoke)
         else overhangLevel = 0;
         if (ImGui::Combo("Cantilever tolerance", &overhangLevel, overhangLabels, 3))
             model.setPlateOverhang(static_cast<blast_demo::BlastSupportModel::PlateOverhang>(overhangLevel));
+        static const char* redundancyLabels[] = {"Small", "Medium", "Large"};
+        static int redundancyLevel = 2;   // large default (1.0)
+        const float red = model.config().overloadFailureRatio;
+        if (red <= 0.75f) redundancyLevel = 0;         // small (0.7)
+        else if (red <= 0.9f) redundancyLevel = 1;     // medium (0.85)
+        else redundancyLevel = 2;                      // large (1.0)
+        if (ImGui::Combo("Column strength", &redundancyLevel, redundancyLabels, 3))
+            model.setColumnStrength(static_cast<blast_demo::BlastSupportModel::ColumnStrength>(redundancyLevel));
         bool showLabels = scene3d.showLabels();
         if (ImGui::Checkbox("Show node labels", &showLabels))
             scene3d.setShowLabels(showLabels);
