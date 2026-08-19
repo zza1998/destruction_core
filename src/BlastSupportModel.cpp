@@ -406,10 +406,15 @@ void BlastSupportModel::setColumnStrength(ColumnStrength level)
 {
     switch (level)
     {
-    case ColumnStrength::Small:  setColumnFailureRatio(0.7f);  break;
-    case ColumnStrength::Medium: setColumnFailureRatio(0.85f); break;
-    case ColumnStrength::Large:  setColumnFailureRatio(1.0f);  break;
+    // With 4 columns per storey, end the storey once this many are broken:
+    // Small -> break 1 (keep 4/4), Medium -> break 2 (keep 3/4), Large ->
+    // break 3 (keep 2/4).
+    case ColumnStrength::Small:  m_config.minColumnFraction = 1.0f;  break;
+    case ColumnStrength::Medium: m_config.minColumnFraction = 0.75f; break;
+    case ColumnStrength::Large:  m_config.minColumnFraction = 0.5f;  break;
     }
+    m_pending.clear();
+    applyStaticGravityResult(m_staticGravitySolver->solve(m_nodes, m_edges));
 }
 
 void BlastSupportModel::damageColumn(int floor, int slot, float amount)
@@ -542,8 +547,9 @@ void BlastSupportModel::executePendingFail(int nodeId, NodeStatus status, const 
     markIncidentNeighborsDirty(nodeId);
 }
 
-void BlastSupportModel::applyStaticGravityResult(const StaticGravityResult& result)
+int BlastSupportModel::applyStaticGravityResult(const StaticGravityResult& result)
 {
+    int redundancyFailures = 0;
     // Copy diagnostics and the confirmed supported state onto live nodes, then
     // fail unsupported nodes immediately and schedule overloads as one wave.
     for (int i = 0; i < static_cast<int>(m_nodes.size()); ++i)
@@ -567,12 +573,51 @@ void BlastSupportModel::applyStaticGravityResult(const StaticGravityResult& resu
             continue;
         executePendingFail(id, NodeStatus::Unsupported, "", 0.0f, 0.0f, 0.0f, false);
     }
+    // Whole-storey collapse: once fewer than minColumnFraction of a storey's
+    // original columns are alive, the storey can no longer stand, and its
+    // remaining columns collapse together (which then releases the storeys above).
+    if (m_config.minColumnFraction > 0.0f && m_activeColumns > 0)
+    {
+        std::vector<int> alivePerFloor(m_activeFloors, 0);
+        for (int i = 1; i < static_cast<int>(m_nodes.size()); ++i)
+        {
+            const NodeState& n = m_nodes[static_cast<size_t>(i)];
+            if (!n.alive || deriveRole(n.box) != MemberRole::VerticalBearing) continue;
+            if (n.floor >= 0 && n.floor < m_activeFloors && !isThinBearing(n.box))
+                ++alivePerFloor[static_cast<size_t>(n.floor)];
+        }
+        for (int floor = 0; floor < m_activeFloors; ++floor)
+        {
+            const float remaining = static_cast<float>(alivePerFloor[static_cast<size_t>(floor)]) /
+                                    static_cast<float>(m_activeColumns);
+            if (remaining >= m_config.minColumnFraction) continue;
+            for (int i = 1; i < static_cast<int>(m_nodes.size()); ++i)
+            {
+                NodeState& n = m_nodes[static_cast<size_t>(i)];
+                if (!n.alive || deriveRole(n.box) != MemberRole::VerticalBearing) continue;
+                if (n.floor != floor) continue;
+                if (isThinBearing(n.box)) continue;
+                executePendingFail(i, NodeStatus::Overloaded, "redundancy", 0.0f, 0.0f, 0.0f, true);
+                ++redundancyFailures;
+            }
+            addEvent("Floor " + std::to_string(floor + 1) + " lost too many columns (" +
+                     std::to_string(alivePerFloor[static_cast<size_t>(floor)]) + "/" +
+                     std::to_string(m_activeColumns) + " remain, below " +
+                     std::to_string(static_cast<int>(m_config.minColumnFraction * 100.0f)) + "%).");
+        }
+    }
     for (int id : result.overloadedNodes)
     {
         if (id <= 0 || id >= static_cast<int>(m_nodes.size()) || !m_nodes[static_cast<size_t>(id)].alive)
             continue;
         const NodeState& node = m_nodes[static_cast<size_t>(id)];
         const bool isPlate = deriveRole(node.box) == MemberRole::HorizontalPlate;
+        // With whole-storey collapse mode active, vertical bearings are failed
+        // only by the redundancy check (minColumnFraction) above, not by axial
+        // overload — otherwise redistribution would break columns before the
+        // storey reaches its "N columns remain" threshold.
+        if (!isPlate && m_config.minColumnFraction > 0.0f)
+            continue;
         const bool bendingDominant = isPlate || node.bendingUtilization > node.compressionUtilization;
         const std::string reason = bendingDominant ? "bending" : "axial";
         if (bendingDominant && !isPlate)
@@ -593,6 +638,7 @@ void BlastSupportModel::applyStaticGravityResult(const StaticGravityResult& resu
             scheduleFail(id, NodeStatus::Overloaded, reason, normalForce, 0.0f, 0.0f);
         }
     }
+    return redundancyFailures;
 }
 
 void BlastSupportModel::update(float time)
@@ -637,8 +683,8 @@ void BlastSupportModel::tickAnalysis()
     for (; wave < maxWaves; ++wave)
     {
         const StaticGravityResult result = m_staticGravitySolver->solve(m_nodes, m_edges);
-        applyStaticGravityResult(result);
-        if (result.unsupportedNodes.empty())
+        const int redundancyFailures = applyStaticGravityResult(result);
+        if (result.unsupportedNodes.empty() && redundancyFailures == 0)
             break;
     }
 

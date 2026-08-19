@@ -25,6 +25,11 @@ struct StructuralConfig
     // of collapsing floor-by-floor from the top.
     float upperColumnSafetyFactor = 2.5f;
     float overloadFailureRatio = 1.0f;
+    // Minimum fraction of a storey's columns that must be alive for the storey to
+    // keep standing. When fewer survive, the storey's remaining columns collapse
+    // as a whole (designer-facing "how many must I break to end a floor"): 1.0 =
+    // any break ends it, 0.75 = break a quarter, 0.5 = break half.
+    float minColumnFraction = 0.5f;
     // Horizontal shear capacity of a floor plate, in load units (mass). Retained
     // for public API/preset compatibility; the static-gravity solver no longer
     // drives structural failure from lateral shear.
@@ -104,8 +109,8 @@ public:
     // Sets the vertical-bearing failure threshold: a column fails when its axial
     // utilization (carried mass / capacity) reaches this fraction.
     void setColumnFailureRatio(float ratio);
-    // Convenience presets: Small=0.7 (fails at 70% usage, fragile), Medium=0.85,
-    // Large=1.0 (fails only at full capacity, sturdy).
+    // Convenience presets controlling how many columns must break before a storey
+    // ends: Small = break 1 (of 4), Medium = break 2, Large = break 3.
     enum class ColumnStrength { Small, Medium, Large };
     void setColumnStrength(ColumnStrength level);
 
@@ -136,7 +141,7 @@ private:
     // Applies one StaticGravityResult to model state: copies supported/load and
     // diagnostic fields onto live nodes, then schedules/executes reported
     // failures (unsupported immediate, overloaded as a delayed wave).
-    void applyStaticGravityResult(const StaticGravityResult& result);
+    int applyStaticGravityResult(const StaticGravityResult& result);
     void markDirty(int nodeId);
     void markIncidentNeighborsDirty(int nodeId);
     void addEvent(const std::string& text);
