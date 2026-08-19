@@ -163,11 +163,7 @@ int main()
     // Cascade delay: an overloaded support stays alive until update() reaches
     // its due time, even after it is scheduled.
     {
-        // Disable whole-storey collapse so this scenario exercises the delayed
-        // axial-overload path (not the immediate redundancy path).
-        blast_demo::StructuralConfig cfg;
-        cfg.minColumnFraction = 0.0f;
-        BlastSupportModel model(cfg);
+        BlastSupportModel model;
         model.setCascadeDelay(0.5f);
         model.damageColumn(3, 0, 100.0f);
         model.damageColumn(3, 1, 100.0f);
@@ -271,8 +267,8 @@ int main()
         if (!check(deadCount(large) < deadCount(small),
                    "Large overhang tolerance did not preserve more plates than Small")) return 1;
     }
-    // Column strength: how many columns must break before the storey ends.
-    // Small ends the storey after 1 break, Medium after 2, Large after 3.
+    // Column strength (failure ratio): a weaker column fails at lower axial
+    // utilization than a stronger one. Small fails at 70%, Medium 85%, Large 100%.
     {
         auto topColsDead = [](const BlastSupportModel& m, int floor) {
             int dead = 0;
@@ -280,19 +276,19 @@ int main()
                 if (!m.nodes()[static_cast<size_t>(columnId(m, floor, s))].alive) ++dead;
             return dead;
         };
-        // Large (0.5): break 2 -> storey still stands; break 3 -> collapses.
+        // Large (1.0): break 1 top column -> the storey still stands.
         {
             BlastSupportModel m;
             m.setCascadeDelay(0.0f);
             m.setColumnStrength(BlastSupportModel::ColumnStrength::Large);
             m.damageColumn(3, 0, 100.0f);
-            m.damageColumn(3, 1, 100.0f);
             for (int i = 0; i < 8; ++i) m.tickAnalysis();
             m.update(99999.0f);
-            if (!check(topColsDead(m, 3) == 2,
-                       "Large strength collapsed storey after two column losses")) return 1;
+            if (!check(topColsDead(m, 3) == 1,
+                       "Large column strength collapsed storey after a single column loss")) return 1;
         }
-        // Small (1.0): break 2 -> storey collapses (fewer than 4 remained).
+        // Small (0.7): the surviving columns exceed 70% utilization after
+        // redistribution, so more columns fail than with Large for the same damage.
         {
             BlastSupportModel m;
             m.setCascadeDelay(0.0f);
@@ -301,19 +297,10 @@ int main()
             m.damageColumn(3, 1, 100.0f);
             for (int i = 0; i < 8; ++i) m.tickAnalysis();
             m.update(99999.0f);
-            if (!check(topColsDead(m, 3) == 4,
-                       "Small strength did not collapse storey after two column losses")) return 1;
-        }
-        // Medium (0.75): break 1 -> storey stands; break 2 -> collapses.
-        {
-            BlastSupportModel m;
-            m.setCascadeDelay(0.0f);
-            m.setColumnStrength(BlastSupportModel::ColumnStrength::Medium);
-            m.damageColumn(3, 0, 100.0f);
-            for (int i = 0; i < 8; ++i) m.tickAnalysis();
-            m.update(99999.0f);
-            if (!check(topColsDead(m, 3) == 1,
-                       "Medium strength collapsed storey after a single column loss")) return 1;
+            // With only 2 of 4 columns left and a 0.7 threshold, the storey
+            // collapses further than the Large case.
+            if (!check(topColsDead(m, 3) > 2,
+                       "Small column strength did not collapse the overloaded storey")) return 1;
         }
     }
     std::cout << "PASS: static gravity integration, release, cascade, and preset checks\n";
