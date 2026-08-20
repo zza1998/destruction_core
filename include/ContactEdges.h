@@ -33,7 +33,7 @@ inline std::vector<EdgeState> rebuildEdgesFromContacts(const std::vector<NodeSta
 
         // Grounded vertical bearing stands on the ground plane.
         if (deriveRole(ni.box) == MemberRole::VerticalBearing && boxGrounded(ni.box, kContactTol))
-            edges.push_back({i, 0, 0.0f, 0.0f, alive(i)});
+            edges.push_back({i, 0, alive(i), 1.0f});
 
         for (int j = i + 1; j < total; ++j)
         {
@@ -49,16 +49,16 @@ inline std::vector<EdgeState> rebuildEdgesFromContacts(const std::vector<NodeSta
             const float jOnI = nj.box.minY() - ni.box.maxY();
             if (std::fabs(iOnJ) <= kContactTol && xzOverlap(ni.box, nj.box) > -kContactTol)
             {
-                edges.push_back({i, j, 0.0f, 0.0f, alive(i) && alive(j)});
+                edges.push_back({i, j, alive(i) && alive(j), 1.0f});
             }
             else if (std::fabs(jOnI) <= kContactTol && xzOverlap(ni.box, nj.box) > -kContactTol)
             {
-                edges.push_back({j, i, 0.0f, 0.0f, alive(i) && alive(j)});
+                edges.push_back({j, i, alive(i) && alive(j), 1.0f});
             }
             else if (horizontalContact(ni.box, nj.box, kContactTol))
             {
-                edges.push_back({i, j, 0.0f, 0.0f, alive(i) && alive(j)});
-                edges.push_back({j, i, 0.0f, 0.0f, alive(i) && alive(j)});
+                edges.push_back({i, j, alive(i) && alive(j), 1.0f});
+                edges.push_back({j, i, alive(i) && alive(j), 1.0f});
             }
         }
     }

@@ -35,17 +35,16 @@ struct NodeState
     float mass = 0.0f;
     float load = 0.0f;
     float capacity = 0.0f;
-    bool alive = true;
+bool alive = true;
     bool supported = true;
     NodeStatus status = NodeStatus::Safe;
-    float releasedLoad = 0.0f;
     // Horizontal (lateral) force accumulated on this member from relaying the
     // released load of a dead support sideways to its same-storey neighbours.
     // Diagnostic: only plates are *failed* on this; bearings get a nonzero
     // shearCapacity so their UI/lateral reads are meaningful.
     float lateralShear = 0.0f;
     float shearCapacity = 0.0f;   // horizontal shear limit for a plate
-BoxLayout box;                  // geometric bounds (single source of truth)
+    BoxLayout box;                  // geometric bounds (single source of truth)
     float maxOverhang = 0.0f;       // 0 means ignore bending in v1.
     float carriedMass = 0.0f;       // Solver diagnostic, includes own mass.
     float carriedComX = 0.0f;       // Solver diagnostic.
@@ -59,8 +58,6 @@ struct EdgeState
 {
     int from = 0;
     int to = 0;
-    float capacity = 0.0f;
-    float load = 0.0f;
     bool alive = true;
     float shareWeight = 1.0f;
 };

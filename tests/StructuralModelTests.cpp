@@ -55,9 +55,9 @@ int main()
         nodes[0] = {0, "Ground", -1, 0, 100, 0, 0, 100000, true, true, blast_demo::NodeStatus::Safe};
         nodes[1] = {1, "Column", 0, 0, 100, 1, 0, 10, true, true, blast_demo::NodeStatus::Safe};
         SupportGraphSolver solver;
-        if (!check(!solver.hasGroundPath(1, nodes, {{0, 1, 1, 0, true}}),
+if (!check(!solver.hasGroundPath(1, nodes, {{0, 1, true, 1.0f}}),
                    "Ground path traversal incorrectly walked an edge backwards")) return 1;
-        if (!check(solver.hasGroundPath(1, nodes, {{1, 0, 1, 0, true}}),
+        if (!check(solver.hasGroundPath(1, nodes, {{1, 0, true, 1.0f}}),
                    "directed column Ground path was not found")) return 1;
     }
     // Default reset leaves every non-ground node alive.

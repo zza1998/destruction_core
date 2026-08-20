@@ -226,7 +226,6 @@ bool BlastSupportModel::damageNode(int nodeId, float amount)
     addEvent(node.name + " damage -> " + std::to_string(static_cast<int>(node.health)) + " HP");
     if (node.health == 0.0f)
     {
-        node.releasedLoad = node.mass;
         node.alive = false;
         addEvent(node.name + " failed; load path removed.");
         std::vector<FragmentSpawnInfo> fragments;
@@ -495,7 +494,6 @@ void BlastSupportModel::executePendingFail(int nodeId, NodeStatus status, const 
                                            float snapN, float snapV, float snapM, bool spawnFragments)
 {
     NodeState& node = m_nodes[nodeId];
-    node.releasedLoad = node.mass;
     node.health = 0.0f;
     node.alive = false;
     node.supported = false;
