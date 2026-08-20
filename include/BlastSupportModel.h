@@ -23,12 +23,8 @@ struct StructuralConfig
     // so a lower storey has a larger absolute margin than an upper one and
     // survives a partial load redistribution (e.g. two destroyed columns) instead
     // of collapsing floor-by-floor from the top.
-    float upperColumnSafetyFactor = 2.5f;
+float upperColumnSafetyFactor = 2.5f;
     float overloadFailureRatio = 1.0f;
-    // Horizontal shear capacity of a floor plate, in load units (mass). Retained
-    // for public API/preset compatibility; the static-gravity solver no longer
-    // drives structural failure from lateral shear.
-    float plateShearCapacity = 300.0f;
     // How far a floor plate may overhang past its last support before the
     // resulting cantilever moment fails it, expressed as a multiple of its own
     // half-width. Small values snap a free end quickly; large values let a plate
@@ -43,7 +39,7 @@ enum class StructuralPreset
 {
     Floors5Columns4,
     Grid4x4Floors4,
-    ShearPair       // 单层双板对：用于测试横向剪切中继 (detectLateralShear)
+    ShearPair       // 单层双板对：用于测试横向悬挑 (cantilever overhang)
 };
 
 class BlastSupportModel
@@ -91,10 +87,7 @@ public:
     const std::vector<std::string>& events() const { return m_events; }
     uint32_t seed() const { return m_seed; }
     bool progressiveCollapse() const { return m_progressiveCollapse; }
-    const StructuralConfig& config() const { return m_config; }
-    // Single source for the lateral (shear) failure threshold. Updates the
-    // config and re-derives every member's shearCapacity from its geometry.
-    void setPlateShearCapacity(float loadUnits);
+const StructuralConfig& config() const { return m_config; }
     // Sets how far a floor plate may overhang its last support before snapping,
     // as a multiple of its own half-width. Re-derives every slab's maxOverhang.
     void setPlateOverhangFactor(float factor);

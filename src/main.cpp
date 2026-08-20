@@ -140,14 +140,8 @@ static int runDemo(bool smoke)
             {
                 if (ImGui::BeginChild("analysisChild", ImVec2(0, 0), true))
                 {
-        if (ImGui::SliderFloat("Cascade Delay", &cascadeDelay, 0.0f, 3.0f, "%.2f s"))
+if (ImGui::SliderFloat("Cascade Delay", &cascadeDelay, 0.0f, 3.0f, "%.2f s"))
             model.setCascadeDelay(cascadeDelay);
-        // Structural lateral (shear) failure threshold — single source for the
-        // real failure criterion (LoadPathSolver drives axial, detectLateralShear
-        // drives plate shear against per-node shearCapacity).
-        float plateShear = model.config().plateShearCapacity;
-        if (ImGui::SliderFloat("Shear cap (load)", &plateShear, 50.0f, 5000.0f, "%.0f"))
-            model.setPlateShearCapacity(plateShear);
         static const char* overhangLabels[] = {"Small", "Medium", "Large"};
         static int overhangLevel = 1;   // medium default, persists across frames
         const float f = model.config().plateOverhangFactor;
@@ -192,16 +186,10 @@ static int runDemo(bool smoke)
             ImGui::Text("Active structure: %d floors x %d columns", model.activeFloors(), model.activeColumns());
         ImGui::Text("Physics bodies: %d", physics.bodyCount());
         const blast_demo::NodeState* selectedNode = nodeById(model, selected);
-        if (selectedNode)
+if (selectedNode)
         {
             ImGui::Text("%s (%s)", selectedNode->name.c_str(), selectedNode->alive ? "live" : "removed");
             ImGui::Text("Weight %.1f | load %.1f / %.1f", selectedNode->mass, selectedNode->load, selectedNode->capacity);
-            // Lateral (shear) force in load units and its share of the shear
-            // capacity; !SHEAR when it exceeds it and the plate would shear-fail.
-            const float slat = selectedNode->lateralShear;
-            const bool sover = slat > selectedNode->shearCapacity;
-            ImGui::Text("Lateral shear %.1f / %.1f%s", slat, selectedNode->shearCapacity,
-                        sover ? "   !SHEAR" : "");
             if (selectedNode->alive && ImGui::Button("Destroy Selected"))
             {
                 model.damageNode(selected, 100000.0f);
@@ -216,18 +204,12 @@ static int runDemo(bool smoke)
         ImGui::Separator(); ImGui::Text("Nodes");
         ImGui::RadioButton("All", &filter, 0); ImGui::SameLine(); ImGui::RadioButton("Block", &filter, 1); ImGui::SameLine(); ImGui::RadioButton("Column", &filter, 2); ImGui::SameLine(); ImGui::RadioButton("Wall", &filter, 3);
         if (ImGui::BeginChild("nodes", ImVec2(0, 190), true))
-            for (const blast_demo::NodeState& node : model.nodes())
+for (const blast_demo::NodeState& node : model.nodes())
                 if (node.id != 0 && (filter == 0 || (filter == 1 && blast_demo::deriveRole(node.box) == blast_demo::MemberRole::HorizontalPlate) || ((filter == 2 || filter == 3) && blast_demo::deriveRole(node.box) == blast_demo::MemberRole::VerticalBearing)))
                 {
-                    // Each member shows its lateral (shear) force in load units,
-                    // its shear capacity, and a !SHEAR flag when over capacity.
-                    const float lat = node.lateralShear;
-                    const bool over = lat > node.shearCapacity;
                     if (ImGui::Selectable(
                             (node.name + "  W " + std::to_string(static_cast<int>(node.mass)) +
-                             "  V " + (lat > 0.0f ? std::to_string(static_cast<int>(lat)) : "0") +
-                             "/" + std::to_string(static_cast<int>(node.shearCapacity)) +
-                             (over ? "  !SHEAR" : "") + (node.alive ? "" : "  REMOVED")).c_str(),
+                             (node.alive ? "" : "  REMOVED")).c_str(),
                             selected == node.id))
                         selected = node.id;
                 }

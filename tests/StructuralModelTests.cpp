@@ -213,20 +213,13 @@ if (!check(!solver.hasGroundPath(1, nodes, {{0, 1, true, 1.0f}}),
         if (!check(model.nodes()[wallId(model, 2, 0)].carriedMass > 0.0f,
                    "grid wall did not carry a positive load")) return 1;
     }
-    // ShearPair preset remains constructible, and lateral shear no longer drives
-    // failure: after killing an end column, all live nodes keep lateralShear==0.
+// ShearPair preset remains constructible with correct dimensions.
     {
         BlastSupportModel model;
         model.setPreset(StructuralPreset::ShearPair);
         if (!check(model.activeFloors() == 1 && model.activeColumns() == 2 &&
                    model.activeBlocks() == 4, "ShearPair preset dimensions wrong"))
             return 1;
-        model.damageColumn(0, 0, 100.0f);
-        for (int i = 0; i < 8; ++i) model.tickAnalysis();
-        model.update(99999.0f);
-        for (const NodeState& node : model.nodes())
-            if (node.id != 0 && node.alive && node.lateralShear != 0.0f)
-                return check(false, "lateralShear is nonzero after static gravity analysis") ? 1 : 1;
     }
     // Cantilever (overhang) failure: after destroying the left end column of a
     // ShearPair row, the now-free left plates overhang and fail, while the plate

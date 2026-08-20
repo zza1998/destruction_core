@@ -108,9 +108,8 @@ void BlastSupportModel::reset()
             slab.floor = floor;
             slab.slot = slot;
             slab.health = 100;
-            slab.mass = 25;
+slab.mass = 25;
             slab.capacity = 290;
-            slab.shearCapacity = m_config.plateShearCapacity;
             slab.alive = true;
             slab.supported = true;
             slab.status = NodeStatus::Safe;
@@ -146,13 +145,9 @@ const float capacity = isGrid() ? gridCapacityFor(floor)
             // the reference column section (the 0.3x0.3 1:1 column that the
             // capacity values are tuned for), so a thicker member both carries
             // more of the storey (area-weighted load) and can hold more.
-            const float refArea = (2.0f * 0.3f) * (2.0f * 0.3f);
+const float refArea = (2.0f * 0.3f) * (2.0f * 0.3f);
             const float memberArea = (2.0f * col.box.hx) * (2.0f * col.box.hz);
             col.capacity = capacity * (memberArea / refArea);
-            // Lateral capacity scales with the member's own section like axial
-            // capacity, from the single plateShearCapacity source. Necessary so
-            // a vertical bearing does not shear on any trivial positive value.
-            col.shearCapacity = m_config.plateShearCapacity * (memberArea / refArea);
             m_nodes.push_back(col);
         }
     }
@@ -182,8 +177,7 @@ const float capacity = isGrid() ? gridCapacityFor(floor)
             wall.box = nodeLayout(floor, slot, LayoutKind::Wall, m_activeColumns, m_activeBlocks, false);
             const float refArea = (2.0f * 0.3f) * (2.0f * 0.3f);
             const float memberArea = (2.0f * wall.box.hx) * (2.0f * wall.box.hz);
-            wall.capacity = capacity * (memberArea / refArea);
-            wall.shearCapacity = m_config.plateShearCapacity * (memberArea / refArea);
+wall.capacity = capacity * (memberArea / refArea);
             m_nodes.push_back(wall);
         }
     }
@@ -343,29 +337,6 @@ float BlastSupportModel::columnCapacityFor(int floor) const
     const int stories = m_activeFloors - floor;
     const float nominalLoad = 50.0f * static_cast<float>(stories);
     return nominalLoad * m_config.upperColumnSafetyFactor;
-}
-
-void BlastSupportModel::setPlateShearCapacity(float loadUnits)
-{
-    m_config.plateShearCapacity = std::max(loadUnits, 0.0f);
-    // Re-derive every member's lateral (shear) capacity, mirroring reset():
-    // a plate keeps the nominal config value; a vertical bearing scales with
-    // its own section like its axial capacity, so a thicker member resists
-    // more lateral load.
-    static constexpr float kRefArea = (2.0f * 0.3f) * (2.0f * 0.3f);
-    for (NodeState& node : m_nodes)
-    {
-        if (node.id == 0) continue;
-        if (deriveRole(node.box) == MemberRole::VerticalBearing)
-        {
-            const float memberArea = (2.0f * node.box.hx) * (2.0f * node.box.hz);
-            node.shearCapacity = m_config.plateShearCapacity * (memberArea / kRefArea);
-        }
-        else
-        {
-            node.shearCapacity = m_config.plateShearCapacity;
-        }
-    }
 }
 
 void BlastSupportModel::setPlateOverhangFactor(float factor)
@@ -544,10 +515,9 @@ void BlastSupportModel::applyStaticGravityResult(const StaticGravityResult& resu
 {
     // Copy diagnostics and the confirmed supported state onto live nodes, then
     // fail unsupported nodes immediately and schedule overloads as one wave.
-    for (int i = 0; i < static_cast<int>(m_nodes.size()); ++i)
+for (int i = 0; i < static_cast<int>(m_nodes.size()); ++i)
     {
         NodeState& node = m_nodes[static_cast<size_t>(i)];
-        node.lateralShear = 0.0f;
         if (i == 0 || !node.alive) continue;
         const StaticGravityNodeResult& r = result.nodes[static_cast<size_t>(i)];
         node.supported = r.supported;
