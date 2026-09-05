@@ -4,6 +4,10 @@ This demo visualizes a simplified building support graph and drives structural
 collapse from static gravity load routing, with PhysX providing the falling/debris
 presentation.
 
+
+## Demo Scene
+![structure destruction](docs/20260905091026_rec_.gif)
+
 ## Structural model
 
 The active analysis path is a static gravity solver (`StaticGravitySolver`):
