@@ -33,12 +33,11 @@ public:
 
 bool shouldFall(const NodeState& node)
 {
-    // Collapse is driven purely by the confirmed structure state. During a
-    // cascade the structure model schedules failures with a delay, so a member
-    // may temporarily carry an over-capacity load or be marked Overloaded while
-    // still standing; the physics layer must wait until the model actually
-    // kills it (alive=false / Unsupported) instead of reacting early.
-    return !node.alive || node.status == NodeStatus::Unsupported;
+    // Collapse is driven purely by the confirmed structure state. The static
+    // gravity model resolves every failed or unsupported node to alive==false
+    // before this layer is consulted, so the physics layer only reacts to a
+    // model-confirmed release and never to a transient overload or support loss.
+    return !node.alive;
 }
 
 void writeMat44(const physx::PxMat44& m, float* out16)
@@ -100,7 +99,7 @@ void PhysicsWorld::shutdown()
 void PhysicsWorld::createBody(const BlastSupportModel& model, int nodeId)
 {
     const NodeState& node = model.nodes()[static_cast<size_t>(nodeId)];
-    const BoxLayout layout = nodeLayout(node, model.activeColumns(), model.activeBlocks(), model.isHouse());
+    const BoxLayout layout = node.box;
     const physx::PxTransform pose(physx::PxVec3(layout.cx, layout.cy, layout.cz));
     const physx::PxBoxGeometry geometry(layout.hx, layout.hy, layout.hz);
     Body body;
@@ -152,7 +151,7 @@ void PhysicsWorld::rebuild(const BlastSupportModel& model)
     m_fragments.clear();
     for (size_t index = 0; index < model.nodes().size(); ++index)
     {
-        if (model.nodes()[index].type != NodeType::Ground)
+        if (model.nodes()[index].id != 0)
             createBody(model, static_cast<int>(index));
     }
 }
@@ -172,7 +171,7 @@ void PhysicsWorld::syncFromModel(BlastSupportModel& model)
     for (size_t index = 0; index < model.nodes().size(); ++index)
     {
         const NodeState& node = model.nodes()[index];
-        if (node.type == NodeType::Ground) continue;
+        if (node.id == 0) continue;
         Body& body = m_bodies[index];
         if (!body.actor || body.dynamic) continue;
         // Collapse is driven purely by the structure model: a member that has
@@ -282,7 +281,7 @@ void PhysicsWorld::spawnFragments(const std::vector<FragmentSpawnInfo>& fragment
         if (spawn.nodeId < 0 || spawn.nodeId >= static_cast<int>(model.nodes().size()))
             continue;
         const NodeState& node = model.nodes()[static_cast<size_t>(spawn.nodeId)];
-        const BoxLayout layout = nodeLayout(node, model.activeColumns(), model.activeBlocks(), model.isHouse());
+        const BoxLayout layout = node.box;
         const int k = spawn.fragmentIndex & 7;
         // Each fragment halves all three axes (2x2x2), so the eight pieces
         // reassemble exactly into the member's original box.
@@ -301,6 +300,18 @@ void PhysicsWorld::spawnFragments(const std::vector<FragmentSpawnInfo>& fragment
             node.mass > 0.0f ? std::max(0.5f, node.mass * 0.125f) : 2.0f);
         dyn->setLinearDamping(0.05f);
         dyn->setAngularDamping(0.5f);
+        // A gentle outward burst so a manually destroyed member visibly pops
+        // apart instead of just sagging in place. Each fragment already sits at
+        // one corner of the member, so its corner offset is the natural burst
+        // direction; a small upward lift plus a slight tumble sells the effect
+        // without flinging debris across the scene.
+        physx::PxVec3 burstDir(dx, dy, dz);
+        burstDir.normalize();
+        dyn->setLinearVelocity(burstDir * 1.3f + physx::PxVec3(0.0f, 0.5f, 0.0f));
+        dyn->setAngularVelocity(physx::PxVec3(
+            ((k & 1) ? 1.0f : -1.0f) * 2.0f,
+            ((k & 2) ? 1.0f : -1.0f) * 3.0f,
+            ((k & 4) ? 1.0f : -1.0f) * 2.5f));
         m_scene->addActor(*dyn);
         FragmentBody fragment;
         fragment.actor = dyn;

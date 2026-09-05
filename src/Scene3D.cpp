@@ -1,6 +1,7 @@
 #include "Scene3D.h"
 #include "PhysicsWorld.h"
 #include "SceneLayout.h"
+#include "GeometryDerived.h"
 
 #include <imgui.h>
 #include <glm/gtc/matrix_transform.hpp>
@@ -162,12 +163,15 @@ float rayBox(const glm::vec3& origin, const glm::vec3& dir,
     return tmin <= tmax ? tmin : -1.0f;
 }
 
-glm::vec4 statusColor(const NodeState& node)
+glm::vec4 statusColor(const NodeState& node, float utilization)
 {
     if (!node.alive) return glm::vec4(0.32f, 0.30f, 0.28f, 1.0f);
     if (node.status == NodeStatus::Falling)
         return glm::vec4(0.45f, 0.35f, 0.85f, 1.0f); // purple: physically collapsing
     if (node.status == NodeStatus::Overloaded) return glm::vec4(0.90f, 0.42f, 0.15f, 1.0f);
+    // Stiffness-mode utilization highlight takes priority: >80% turns amber.
+    if (utilization > 1.0f) return glm::vec4(0.90f, 0.30f, 0.15f, 1.0f);
+    if (utilization > 0.8f) return glm::vec4(0.85f, 0.64f, 0.18f, 1.0f);
     if (node.status == NodeStatus::Warning || node.health < 50.0f)
         return glm::vec4(0.85f, 0.64f, 0.18f, 1.0f);
     return glm::vec4(0.24f, 0.58f, 0.38f, 1.0f);
@@ -369,7 +373,7 @@ void Scene3D::render(const BlastSupportModel& model, PhysicsWorld& physics, int 
     ImDrawList* draw = ImGui::GetForegroundDrawList();
     for (const NodeState& node : model.nodes())
     {
-        if (node.type == NodeType::Ground) continue;
+        if (node.id == 0) continue;
         if (!physics.hasBody(node.id)) continue;
         const bool standing = node.alive;
         const bool debris = !node.alive && physics.isDynamic(node.id);
@@ -397,12 +401,14 @@ void Scene3D::render(const BlastSupportModel& model, PhysicsWorld& physics, int 
 
         float pose[16] = {};
         if (!physics.transformFor(node.id, pose)) continue;
-        const BoxLayout layout = nodeLayout(node, model.activeColumns(), model.activeBlocks(), model.isHouse());
+        const BoxLayout layout = node.box;
         const glm::mat4 poseMat = glm::make_mat4(pose);
         const glm::mat4 modelMatrix = poseMat *
             glm::scale(glm::mat4(1.0f), glm::vec3(layout.hx, layout.hy, layout.hz));
 
-        const glm::vec4 color = statusColor(node);
+        // Color purely by structural state (alive/fallen/status); the stiffness
+        // utilization pass was removed with the diagnostic stiffness layer.
+        const glm::vec4 color = statusColor(node, 0.0f);
         gl.Uniform4f(m_colorLocation, color.r, color.g, color.b, color.a);
         gl.UniformMatrix4fv(m_modelLocation, 1, GL_FALSE, glm::value_ptr(modelMatrix));
         gl.DrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_INT, nullptr);
@@ -434,15 +440,17 @@ void Scene3D::render(const BlastSupportModel& model, PhysicsWorld& physics, int 
     }
 
     // "Show support links": draw one line per live directed support edge
-    // (edge.from depends on edge.to) from the center of the from-box to the
-    // center of the to-box. Color marks the supporter: white = Ground, green =
-    // column/wall, yellow = block. Lines are drawn with the edge shader over
-    // the same geometry so the depth test keeps them on top of the boxes.
+    // (edge.from depends on edge.to). Color marks the supporter: white = Ground,
+    // green = column/wall, yellow = block. The line endpoints are pushed outward
+    // from each member's centre past its surface, so a link floats in the gap
+    // between members instead of being buried inside a solid box.
     if (m_showSupportLinks)
     {
         std::vector<float> links;
         links.reserve(model.edges().size() * 6u);
+        std::vector<glm::vec3> endpoints;
         std::vector<glm::vec4> linkColors;
+        std::vector<glm::vec4> endpointColors;
         for (const EdgeState& edge : model.edges())
         {
             if (edge.from <= 0 || edge.from >= static_cast<int>(model.nodes().size()) ||
@@ -451,16 +459,35 @@ void Scene3D::render(const BlastSupportModel& model, PhysicsWorld& physics, int 
             const NodeState& from = model.nodes()[static_cast<size_t>(edge.from)];
             const NodeState& to = model.nodes()[static_cast<size_t>(edge.to)];
             if (!from.alive || !to.alive) continue;
-            const BoxLayout a = nodeLayout(from, model.activeColumns(), model.activeBlocks(), model.isHouse());
-            const BoxLayout b = nodeLayout(to, model.activeColumns(), model.activeBlocks(), model.isHouse());
-            links.push_back(a.cx); links.push_back(a.cy); links.push_back(a.cz);
-            links.push_back(b.cx); links.push_back(b.cy); links.push_back(b.cz);
-            if (to.type == NodeType::Ground)
-                linkColors.push_back(glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
-            else if (to.type == NodeType::Column || to.type == NodeType::Wall)
-                linkColors.push_back(glm::vec4(0.35f, 0.85f, 0.35f, 1.0f));
+            const BoxLayout a = from.box;
+            const BoxLayout b = to.box;
+            glm::vec3 pa(a.cx, a.cy, a.cz);
+            glm::vec3 pb(b.cx, b.cy, b.cz);
+            glm::vec3 dir = pb - pa;
+            const float len = glm::length(dir);
+            if (len < 1e-4f) continue;
+            dir /= len;
+            // Push each endpoint out along the direction past the member's
+            // surface plus a small gap so the line is clearly visible.
+            const float gap = 0.12f;
+            const float rA = std::max(a.hx, std::max(a.hy, a.hz));
+            const float rB = std::max(b.hx, std::max(b.hy, b.hz));
+            pa += dir * (rA + gap);
+            pb -= dir * (rB + gap);
+            links.push_back(pa.x); links.push_back(pa.y); links.push_back(pa.z);
+            links.push_back(pb.x); links.push_back(pb.y); links.push_back(pb.z);
+            endpoints.push_back(pa);
+            endpoints.push_back(pb);
+            glm::vec4 color;
+            if (to.id == 0)
+                color = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f);
+            else if (deriveRole(to.box) == MemberRole::VerticalBearing)
+                color = glm::vec4(0.9f, 0.2f, 0.2f, 1.0f);
             else
-                linkColors.push_back(glm::vec4(0.95f, 0.85f, 0.25f, 1.0f));
+                color = glm::vec4(0.95f, 0.85f, 0.25f, 1.0f);
+            linkColors.push_back(color);
+            endpointColors.push_back(color);
+            endpointColors.push_back(color);
         }
         if (!links.empty())
         {
@@ -472,6 +499,10 @@ void Scene3D::render(const BlastSupportModel& model, PhysicsWorld& physics, int 
             gl.BindBuffer(GL_ARRAY_BUFFER, m_linkVbo);
             gl.BufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(links.size() * sizeof(float)),
                           links.data(), GL_STREAM_DRAW);
+            // Draw the links on top of the boxes so they are never hidden
+            // inside a solid member: disable depth testing while drawing the
+            // lines, then restore it for the boxes below.
+            glDisable(GL_DEPTH_TEST);
             size_t vertex = 0;
             for (size_t i = 0; i < linkColors.size(); ++i)
             {
@@ -480,8 +511,24 @@ void Scene3D::render(const BlastSupportModel& model, PhysicsWorld& physics, int 
                 gl.DrawArrays(GL_LINES, static_cast<GLsizei>(vertex), 2);
                 vertex += 2;
             }
-            // Restore the box VAO/program: the fragment loop below still draws
-            // indexed cube geometry with the box program.
+            glEnable(GL_DEPTH_TEST);
+            // Draw a small lit cube at each link endpoint so the connection
+            // points stand out. Reuse the box program/VAO (unit cube scaled to
+            // a small ball size) with the endpoint's colour.
+            gl.UseProgram(m_program);
+            gl.UniformMatrix4fv(m_vpLocation, 1, GL_FALSE, glm::value_ptr(vp));
+            gl.BindVertexArray(m_vao);
+            const float ballHalf = std::max(0.02f, m_linkBallSize);
+            for (size_t i = 0; i < endpoints.size(); ++i)
+            {
+                const glm::vec3& p = endpoints[i];
+                const glm::vec4& c = endpointColors[i];
+                const glm::mat4 modelMatrix = glm::translate(glm::mat4(1.0f), p) *
+                    glm::scale(glm::mat4(1.0f), glm::vec3(ballHalf));
+                gl.Uniform4f(m_colorLocation, c.r, c.g, c.b, c.a);
+                gl.UniformMatrix4fv(m_modelLocation, 1, GL_FALSE, glm::value_ptr(modelMatrix));
+                gl.DrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_INT, nullptr);
+            }
             gl.BindVertexArray(m_vao);
             gl.UseProgram(m_program);
         }
@@ -500,7 +547,7 @@ void Scene3D::render(const BlastSupportModel& model, PhysicsWorld& physics, int 
         const int sourceNodeId = physics.fragmentNodeIdFor(i);
         glm::vec4 color(0.32f, 0.30f, 0.28f, 1.0f);
         if (sourceNodeId >= 0 && sourceNodeId < static_cast<int>(model.nodes().size()))
-            color = statusColor(model.nodes()[static_cast<size_t>(sourceNodeId)]);
+            color = statusColor(model.nodes()[static_cast<size_t>(sourceNodeId)], 0.0f);
         const glm::mat4 poseMat = glm::make_mat4(pose);
         const glm::mat4 modelMatrix = poseMat *
             glm::scale(glm::mat4(1.0f), glm::vec3(hx, hy, hz));
@@ -530,11 +577,11 @@ int Scene3D::pick(const BlastSupportModel& model, const PhysicsWorld& physics,
     float bestT = 1e30f;
     for (const NodeState& node : model.nodes())
     {
-        if (node.type == NodeType::Ground) continue;
+        if (node.id == 0) continue;
         if (!node.alive && !physics.isDynamic(node.id)) continue;
         float pose[16] = {};
         if (!physics.transformFor(node.id, pose)) continue;
-        const BoxLayout layout = nodeLayout(node, model.activeColumns(), model.activeBlocks(), model.isHouse());
+        const BoxLayout layout = node.box;
         const glm::vec3 center(pose[12], pose[13], pose[14]);
         const glm::vec3 mn = center - glm::vec3(layout.hx, layout.hy, layout.hz);
         const glm::vec3 mx = center + glm::vec3(layout.hx, layout.hy, layout.hz);

@@ -11,6 +11,7 @@
 namespace blast_demo
 {
 struct NodeState;
+struct EdgeState;
 
 // A visual debris piece split off a structural member. Each member is
 // pre-fractured into 8 fragments (2x2x2); fragmentIndex is 0..7.
@@ -25,15 +26,17 @@ class BlastRuntime
 public:
     ~BlastRuntime();
 
-    bool initialize(const std::vector<NodeState>& nodes, int floors, int columnsPerFloor,
-                    int blocksPerFloor, int wallsPerFloor, std::string& error);
+    bool initialize(const std::vector<NodeState>& nodes, const std::vector<EdgeState>& edges,
+                    int floors, int columnsPerFloor, int blocksPerFloor, int wallsPerFloor,
+                    std::string& error);
     void destroy();
 
-    // Break the member's fragment seams (and, for columns/walls, its bond to
-    // the support below), process the group, and report the visible fragments
-    // that split off as a result.
-    void fractureMember(const NodeState& node, int floors, int columnsPerFloor,
-                        int blocksPerFloor, int wallsPerFloor, std::vector<FragmentSpawnInfo>& outFragments);
+    // Break the member's fragment seams (and, for vertical bearings, its bond
+    // to the support below), process the group, and report the visible
+    // fragments that split off as a result.
+    void fractureMember(const NodeState& node, const std::vector<EdgeState>& edges,
+                        int floors, int columnsPerFloor, int blocksPerFloor, int wallsPerFloor,
+                        std::vector<FragmentSpawnInfo>& outFragments);
 
 private:
     Nv::Blast::TkActor* findActorForChunk(uint32_t chunkIndex);
